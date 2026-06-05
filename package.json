@@ -1,0 +1,23 @@
+{
+  "name": "claude-code-clone",
+  "version": "1.0.0",
+  "description": "A local Claude Code CLI clone using the Anthropic API",
+  "type": "module",
+  "bin": {
+    "claude": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node --enable-source-maps dist/index.js",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "chalk": "^5.4.1",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}
