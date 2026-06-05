@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import os from "os";
 import { execSync } from "child_process";
 import { glob } from "fs/promises";
 import readline from "readline";
@@ -9,11 +10,48 @@ export interface ToolResult {
   isError?: boolean;
 }
 
+// ─── Sensitive-path denylist ──────────────────────────────────────────────────
+// Prevent the model from silently reading credentials and secret files.
+// Applied to readFile and the grep walker.
+
+const HOME = os.homedir();
+const DENYLIST_PREFIXES: string[] = [
+  path.join(HOME, ".ssh"),
+  path.join(HOME, ".aws"),
+  path.join(HOME, ".config", "gh"),
+  path.join(HOME, ".gnupg"),
+  path.join(HOME, ".netrc"),
+  path.join(HOME, ".npmrc"),
+  path.join(HOME, ".pypirc"),
+];
+const DENYLIST_NAMES = new Set([".env", ".env.local", ".env.production", "id_rsa", "id_ed25519", "credentials"]);
+
+function isSensitivePath(resolved: string): boolean {
+  const base = path.basename(resolved);
+  if (DENYLIST_NAMES.has(base)) return true;
+  if (base.endsWith(".pem") || base.endsWith(".key") || base.endsWith(".p12") || base.endsWith(".pfx")) return true;
+  return DENYLIST_PREFIXES.some(p => resolved === p || resolved.startsWith(p + path.sep));
+}
+
+// ─── Regex safety guard ───────────────────────────────────────────────────────
+// Reject patterns that are likely to cause catastrophic backtracking (ReDoS).
+
+const REDOS_PATTERNS = [/\(\?.*\)\*/, /\(\.\+\)\+/, /\(.*\+.*\)\+/, /\(\.\*\)\*/];
+
+function safeRegExp(pattern: string): RegExp | null {
+  if (pattern.length > 500) return null;
+  if (REDOS_PATTERNS.some(r => r.test(pattern))) return null;
+  try { return new RegExp(pattern); } catch { return null; }
+}
+
 // ─── Read File ────────────────────────────────────────────────────────────────
 
 export function readFile(filePath: string, offset?: number, limit?: number): ToolResult {
   try {
     const resolved = path.resolve(filePath);
+    if (isSensitivePath(resolved)) {
+      return { output: `Error: reading ${path.basename(resolved)} is not permitted (sensitive path).`, isError: true };
+    }
     const content = fs.readFileSync(resolved, "utf-8");
     const lines = content.split("\n");
 
@@ -163,13 +201,16 @@ export function grepFiles(
 ): ToolResult {
   try {
     const base = cwd ? path.resolve(cwd) : process.cwd();
-    const re = new RegExp(pattern);
+    const re = safeRegExp(pattern);
+    if (!re) return { output: "Error: pattern rejected — too long or contains unsafe quantifiers.", isError: true };
     const includeRe = includeToRegExp(include);
     const matches: string[] = [];
     const MAX_MATCHES = 1000;
 
+    const deadline = Date.now() + 10_000; // 10-second wall-clock budget
+
     const walk = (dir: string): void => {
-      if (matches.length >= MAX_MATCHES) return;
+      if (matches.length >= MAX_MATCHES || Date.now() > deadline) return;
       let entries: fs.Dirent[];
       try {
         entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -177,12 +218,13 @@ export function grepFiles(
         return;
       }
       for (const entry of entries) {
-        if (matches.length >= MAX_MATCHES) return;
+        if (matches.length >= MAX_MATCHES || Date.now() > deadline) return;
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) {
           if (GREP_SKIP_DIRS.has(entry.name)) continue;
           walk(full);
         } else if (entry.isFile()) {
+          if (isSensitivePath(full)) continue; // never grep through secrets
           if (includeRe && !includeRe.test(entry.name)) continue;
           let content: string;
           try {
@@ -203,7 +245,9 @@ export function grepFiles(
     };
 
     walk(base);
-    return { output: matches.length ? matches.join("\n") : "(no matches)" };
+    const timedOut = Date.now() > deadline;
+    const suffix = timedOut ? "\n(search timed out — partial results)" : "";
+    return { output: matches.length ? matches.join("\n") + suffix : "(no matches)" };
   } catch (err) {
     return { output: String(err), isError: true };
   }

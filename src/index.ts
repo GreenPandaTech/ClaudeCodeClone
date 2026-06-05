@@ -84,12 +84,24 @@ function getToolPreview(name: string, input: Record<string, unknown>): string {
   switch (name) {
     case "read_file":
       return String(input.file_path);
-    case "write_file":
-      return String(input.file_path);
-    case "edit_file":
-      return String(input.file_path);
-    case "bash":
-      return String(input.command).slice(0, 80);
+    case "write_file": {
+      const content = String(input.content ?? "");
+      const lines = content.split("\n");
+      const preview = lines.slice(0, 3).join("\n  ");
+      const tail = lines.length > 3 ? `\n  … (${lines.length} lines total)` : "";
+      return `${input.file_path}\n  ${preview}${tail}`;
+    }
+    case "edit_file": {
+      const oldLine = String(input.old_string ?? "").split("\n")[0];
+      const newLine = String(input.new_string ?? "").split("\n")[0];
+      return `${input.file_path}\n  - ${oldLine}\n  + ${newLine}`;
+    }
+    case "bash": {
+      // Show the full command — never truncate, so the user sees what they're approving.
+      const cmd = String(input.command ?? "");
+      const cwd = input.cwd ? `  cwd: ${input.cwd}` : "";
+      return cmd + (cwd ? `\n${cwd}` : "");
+    }
     case "glob":
       return String(input.pattern);
     case "grep":
