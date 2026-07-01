@@ -13,7 +13,7 @@
     "test": "node --test dist/tools.test.js"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
+    "@anthropic-ai/sdk": "^0.109.0",
     "chalk": "^5.4.1",
     "dotenv": "^16.4.5"
   },
