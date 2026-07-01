@@ -9,7 +9,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node --enable-source-maps dist/index.js",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test": "node --test dist/tools.test.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

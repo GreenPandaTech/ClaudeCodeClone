@@ -306,10 +306,13 @@ async function main() {
           printCost();
           break;
 
-        case "cwd":
-          if (args[0]) {
+        case "cwd": {
+          // Join the remaining args so directory paths that contain spaces
+          // are not truncated at the first space.
+          const dir = args.join(" ").trim();
+          if (dir) {
             try {
-              const target = path.resolve(args[0]);
+              const target = path.resolve(dir);
               process.chdir(target);
               console.log(chalk.dim(`Working directory: ${process.cwd()}`));
             } catch (err) {
@@ -319,6 +322,7 @@ async function main() {
             console.log(process.cwd());
           }
           break;
+        }
 
         case "exit":
         case "quit":

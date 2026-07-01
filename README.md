@@ -61,10 +61,12 @@ Just type naturally. Claude can read, write, and edit files in your working dire
 
 ## Approximate Cost
 
-Using `claude-opus-4-6` with prompt caching:
+Using `claude-sonnet-4-6` (the default model) with prompt caching:
 
 - **Simple question:** ~$0.001–0.005
 - **Editing a file:** ~$0.01–0.05
 - **Large refactor:** ~$0.05–0.20
 
 Prompt caching reduces costs by ~90% on repeated context (the system prompt and earlier messages are cached automatically).
+
+The `/cost` estimate assumes Sonnet 4.6 pricing. If you override the model with the `MODEL` environment variable, the displayed cost will not reflect that model's actual pricing.

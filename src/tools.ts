@@ -26,7 +26,7 @@ const DENYLIST_PREFIXES: string[] = [
 ];
 const DENYLIST_NAMES = new Set([".env", ".env.local", ".env.production", "id_rsa", "id_ed25519", "credentials"]);
 
-function isSensitivePath(resolved: string): boolean {
+export function isSensitivePath(resolved: string): boolean {
   const base = path.basename(resolved);
   if (DENYLIST_NAMES.has(base)) return true;
   if (base.endsWith(".pem") || base.endsWith(".key") || base.endsWith(".p12") || base.endsWith(".pfx")) return true;
@@ -38,7 +38,7 @@ function isSensitivePath(resolved: string): boolean {
 
 const REDOS_PATTERNS = [/\(\?.*\)\*/, /\(\.\+\)\+/, /\(.*\+.*\)\+/, /\(\.\*\)\*/];
 
-function safeRegExp(pattern: string): RegExp | null {
+export function safeRegExp(pattern: string): RegExp | null {
   if (pattern.length > 500) return null;
   if (REDOS_PATTERNS.some(r => r.test(pattern))) return null;
   try { return new RegExp(pattern); } catch { return null; }
@@ -74,6 +74,9 @@ export function readFile(filePath: string, offset?: number, limit?: number): Too
 export function writeFile(filePath: string, content: string): ToolResult {
   try {
     const resolved = path.resolve(filePath);
+    if (isSensitivePath(resolved)) {
+      return { output: `Error: writing ${path.basename(resolved)} is not permitted (sensitive path).`, isError: true };
+    }
     fs.mkdirSync(path.dirname(resolved), { recursive: true });
     fs.writeFileSync(resolved, content, "utf-8");
     return { output: `File written: ${resolved}` };
@@ -91,6 +94,9 @@ export function editFile(
 ): ToolResult {
   try {
     const resolved = path.resolve(filePath);
+    if (isSensitivePath(resolved)) {
+      return { output: `Error: editing ${path.basename(resolved)} is not permitted (sensitive path).`, isError: true };
+    }
     const original = fs.readFileSync(resolved, "utf-8");
 
     if (!original.includes(oldString)) {
@@ -178,7 +184,7 @@ export async function globFiles(
 
 const GREP_SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", ".next", ".cache", "coverage"]);
 
-function includeToRegExp(include?: string): RegExp | null {
+export function includeToRegExp(include?: string): RegExp | null {
   if (!include) return null;
   // Translate a simple glob (*.ts, *.{ts,tsx}) into a RegExp over the basename.
   let re = "";
