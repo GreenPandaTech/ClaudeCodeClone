@@ -1,6 +1,6 @@
-# Claude Code Clone
+# Mentor - a Claude Code style AI coding assistant
 
-A local Claude Code CLI clone powered by the Anthropic API. Uses pay-as-you-go API credits — no subscription required.
+A local, terminal-based AI coding assistant in the style of Claude Code, powered by the Anthropic API. Uses pay-as-you-go API credits — no subscription required.
 
 ## Setup
 
@@ -23,7 +23,7 @@ A local Claude Code CLI clone powered by the Anthropic API. Uses pay-as-you-go A
    npm start
    # or from anywhere after npm link:
    npm link
-   claude
+   mentor
    ```
 
 ## Usage

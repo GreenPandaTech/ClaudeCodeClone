@@ -59,7 +59,7 @@ type Message = Anthropic.MessageParam;
 // ─── UI helpers ───────────────────────────────────────────────────────────────
 
 function printBanner() {
-  console.log(chalk.cyan.bold(`\n  Claude Code Clone v${VERSION}`));
+  console.log(chalk.cyan.bold(`\n  Mentor v${VERSION}`));
   console.log(chalk.dim(`  Model: ${MODEL}`));
   console.log(chalk.dim(`  CWD: ${process.cwd()}`));
   console.log(chalk.dim("  Type /help for commands, Ctrl+C to exit\n"));

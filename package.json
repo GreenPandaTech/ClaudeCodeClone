@@ -1,10 +1,10 @@
 {
-  "name": "claude-code-clone",
+  "name": "mentor",
   "version": "1.0.0",
-  "description": "A local Claude Code CLI clone using the Anthropic API",
+  "description": "A local Claude Code style AI coding assistant CLI powered by the Anthropic API",
   "type": "module",
   "bin": {
-    "claude": "./dist/index.js"
+    "mentor": "./dist/index.js"
   },
   "scripts": {
     "build": "tsc",
