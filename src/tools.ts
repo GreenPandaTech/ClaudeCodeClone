@@ -27,10 +27,25 @@ const DENYLIST_PREFIXES: string[] = [
 const DENYLIST_NAMES = new Set([".env", ".env.local", ".env.production", "id_rsa", "id_ed25519", "credentials"]);
 
 export function isSensitivePath(resolved: string): boolean {
-  const base = path.basename(resolved);
-  if (DENYLIST_NAMES.has(base)) return true;
-  if (base.endsWith(".pem") || base.endsWith(".key") || base.endsWith(".p12") || base.endsWith(".pfx")) return true;
-  return DENYLIST_PREFIXES.some(p => resolved === p || resolved.startsWith(p + path.sep));
+  // Resolve symlinks so a link pointing at a sensitive file cannot bypass the
+  // check. If the path does not exist yet (e.g. a new write), fall back to the
+  // resolved path as given.
+  let target = resolved;
+  try {
+    target = fs.realpathSync(resolved);
+  } catch {
+    /* path does not exist yet — check the literal path */
+  }
+  for (const candidate of target === resolved ? [resolved] : [resolved, target]) {
+    // Compare case-insensitively: Windows and macOS filesystems are
+    // case-insensitive, so ".ENV" or "SECRET.PEM" must also be denied.
+    const lower = candidate.toLowerCase();
+    const base = path.basename(lower);
+    if (DENYLIST_NAMES.has(base)) return true;
+    if (base.endsWith(".pem") || base.endsWith(".key") || base.endsWith(".p12") || base.endsWith(".pfx")) return true;
+    if (DENYLIST_PREFIXES.some(p => lower === p.toLowerCase() || lower.startsWith(p.toLowerCase() + path.sep))) return true;
+  }
+  return false;
 }
 
 // ─── Regex safety guard ───────────────────────────────────────────────────────
