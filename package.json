@@ -2,6 +2,7 @@
   "name": "mentor",
   "version": "1.0.0",
   "description": "A local Claude Code style AI coding assistant CLI powered by the Anthropic API",
+  "license": "SEE LICENSE IN LICENSE",
   "type": "module",
   "bin": {
     "mentor": "./dist/index.js"

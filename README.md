@@ -101,4 +101,4 @@ Requires Node 22+ (see the CI workflow). Stack: TypeScript (ES modules), the `@a
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Proprietary - All Rights Reserved (c) 2026 GreenPandaTech - portfolio viewing only.
