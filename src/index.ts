@@ -11,6 +11,7 @@ import { classifyCommand } from "./safety.js";
 import { loadConfig, loadProjectContext, type MentorConfig } from "./config.js";
 import { parseArgs } from "./cli-args.js";
 import { saveSession, loadSession, listSessions } from "./session.js";
+import { estimateCost, type ModelUsage } from "./pricing.js";
 import { runAgenticLoop, runOnce, type AgentContext, type LlmClient, type LlmStream, type Message } from "./agent.js";
 import { VERSION } from "./version.js";
 
@@ -117,8 +118,9 @@ function printHelp() {
   console.log(chalk.bold("\nCommands:"));
   console.log(chalk.cyan("  /help         ") + "Show this help");
   console.log(chalk.cyan("  /clear        ") + "Clear conversation history");
-  console.log(chalk.cyan("  /cost         ") + "Show approximate token usage this session");
+  console.log(chalk.cyan("  /cost         ") + "Show token usage and estimated cost per model");
   console.log(chalk.cyan("  /cwd <path>   ") + "Change the working directory");
+  console.log(chalk.cyan("  /model [id]   ") + "Show or switch the model for later turns");
   console.log(chalk.cyan("  /save [name]  ") + "Save this conversation to .mentor/sessions");
   console.log(chalk.cyan("  /resume [name]") + " Load a saved conversation");
   console.log(chalk.cyan("  /sessions     ") + "List saved sessions");
@@ -198,42 +200,46 @@ function printToolResult(result: { output: string; isError?: boolean }) {
   }
 }
 
-// ─── Token tracking ───────────────────────────────────────────────────────────
+// ─── Token tracking (per model, so /cost is accurate across model switches) ────
 
-interface Usage {
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-}
+const usageByModel: Record<string, ModelUsage> = {};
 
-const sessionUsage: Usage = {
-  inputTokens: 0,
-  outputTokens: 0,
-  cacheReadTokens: 0,
-  cacheWriteTokens: 0,
-};
-
-function trackUsage(usage: Anthropic.Usage) {
-  sessionUsage.inputTokens += usage.input_tokens;
-  sessionUsage.outputTokens += usage.output_tokens;
-  sessionUsage.cacheReadTokens += usage.cache_read_input_tokens ?? 0;
-  sessionUsage.cacheWriteTokens += usage.cache_creation_input_tokens ?? 0;
+function trackUsage(model: string, usage: Anthropic.Usage) {
+  const u = (usageByModel[model] ??= {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+  });
+  u.inputTokens += usage.input_tokens;
+  u.outputTokens += usage.output_tokens;
+  u.cacheReadTokens += usage.cache_read_input_tokens ?? 0;
+  u.cacheWriteTokens += usage.cache_creation_input_tokens ?? 0;
 }
 
 function printCost() {
-  // Approximate Claude Sonnet 4.6 pricing (the default model): $3/1M input, $15/1M output, $0.30/1M cache read
-  const inputCost = (sessionUsage.inputTokens / 1_000_000) * 3.0;
-  const outputCost = (sessionUsage.outputTokens / 1_000_000) * 15.0;
-  const cacheReadCost = (sessionUsage.cacheReadTokens / 1_000_000) * 0.3;
-  const total = inputCost + outputCost + cacheReadCost;
-
+  const est = estimateCost(usageByModel);
+  if (est.lines.length === 0) {
+    console.log(chalk.dim("\nNo usage yet this session.\n"));
+    return;
+  }
   console.log(chalk.bold("\nSession usage:"));
-  console.log(`  Input tokens:       ${sessionUsage.inputTokens.toLocaleString()}`);
-  console.log(`  Output tokens:      ${sessionUsage.outputTokens.toLocaleString()}`);
-  console.log(`  Cache read tokens:  ${sessionUsage.cacheReadTokens.toLocaleString()}`);
-  console.log(`  Cache write tokens: ${sessionUsage.cacheWriteTokens.toLocaleString()}`);
-  console.log(chalk.cyan(`  Estimated cost:     $${total.toFixed(4)}\n`));
+  for (const line of est.lines) {
+    const label = line.known ? line.model : `${line.model}${chalk.yellow(" (est.)")}`;
+    console.log(`  ${label}`);
+    console.log(
+      chalk.dim(
+        `    in ${line.usage.inputTokens.toLocaleString()}  out ${line.usage.outputTokens.toLocaleString()}` +
+          `  cache-read ${line.usage.cacheReadTokens.toLocaleString()}  cache-write ${line.usage.cacheWriteTokens.toLocaleString()}`,
+      ),
+    );
+    console.log(`    cost $${line.cost.toFixed(4)}`);
+  }
+  console.log(chalk.cyan(`  Total estimated cost: $${est.total.toFixed(4)}`));
+  if (est.anyUnknown) {
+    console.log(chalk.dim("  (est.) = model not in the price table; Sonnet-class rates assumed"));
+  }
+  console.log("");
 }
 
 // ─── Agent context factory ────────────────────────────────────────────────────
@@ -264,7 +270,7 @@ function buildAgentContext(
     ],
     autoApprove: config.autoApprove,
     destructiveTools: DESTRUCTIVE_TOOLS,
-    onUsage: trackUsage,
+    onUsage: (usage) => trackUsage(config.model, usage),
   };
 }
 
@@ -380,6 +386,17 @@ async function main() {
         case "sessions": {
           const names = listSessions(process.cwd());
           console.log(names.length ? "Saved sessions:\n  " + names.join("\n  ") : chalk.dim("No saved sessions."));
+          break;
+        }
+
+        case "model": {
+          const name = args.join(" ").trim();
+          if (!name) {
+            console.log(chalk.dim(`Current model: ${config.model}`));
+          } else {
+            config.model = name;
+            console.log(chalk.dim(`Model set to ${name} for subsequent turns.`));
+          }
           break;
         }
 
