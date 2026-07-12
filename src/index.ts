@@ -5,25 +5,24 @@ import fs from "fs";
 import Anthropic from "@anthropic-ai/sdk";
 import chalk from "chalk";
 import path from "path";
-import { TOOL_DEFINITIONS, executeTool } from "./tools.js";
+import { TOOL_DEFINITIONS, executeTool, configureExtraDenylist } from "./tools.js";
 import { formatDiff } from "./diff.js";
 import { classifyCommand } from "./safety.js";
+import { loadConfig, loadProjectContext, type MentorConfig } from "./config.js";
 import { runAgenticLoop, type AgentContext, type LlmClient, type LlmStream, type Message } from "./agent.js";
 import { VERSION } from "./version.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const MODEL = process.env.MODEL ?? "claude-sonnet-4-6";
-const MAX_TOKENS = 64_000;
-
 // Tools that modify the system require explicit confirmation before running,
-// unless AUTO_APPROVE=1 (or --yes) is set.
+// unless autoApprove is set (via config, AUTO_APPROVE=1, or --yes).
 const DESTRUCTIVE_TOOLS = new Set(["bash", "write_file", "edit_file"]);
-const AUTO_APPROVE = process.env.AUTO_APPROVE === "1" || process.argv.includes("--yes");
 
 // ─── System prompt (cached — never changes, so stays at the front of the prefix) ──
+// Mentor is honest about being Mentor (an assistant built on the Anthropic API),
+// not the Claude Code product it is modelled on.
 
-const SYSTEM_PROMPT = `You are Claude Code, an expert AI coding assistant running in the user's terminal.
+const SYSTEM_PROMPT_BASE = `You are Mentor, an expert AI coding assistant running in the user's terminal, built on the Anthropic API.
 
 You have access to the following tools to help you work with their codebase:
 - read_file: Read file contents with line numbers
@@ -56,6 +55,28 @@ if (!process.env.ANTHROPIC_API_KEY) {
 
 const client = new Anthropic();
 
+// ─── Resolved configuration and system prompt ─────────────────────────────────
+
+function loadConfigOrExit(): MentorConfig {
+  try {
+    const cfg = loadConfig(process.cwd(), process.env);
+    if (process.argv.includes("--yes")) cfg.autoApprove = true;
+    return cfg;
+  } catch (err) {
+    console.error(chalk.red("Configuration error: " + (err instanceof Error ? err.message : String(err))));
+    process.exit(1);
+  }
+}
+
+const config = loadConfigOrExit();
+configureExtraDenylist(config.extraDenylist);
+
+// Fold project memory (MENTOR.md / AGENTS.md) into the cached system prompt.
+const projectContext = loadProjectContext(process.cwd());
+const SYSTEM_TEXT = projectContext
+  ? `${SYSTEM_PROMPT_BASE}\n\n# Project context (from MENTOR.md / AGENTS.md)\n\n${projectContext}`
+  : SYSTEM_PROMPT_BASE;
+
 // Adapter over the real streaming API — the loop lives in agent.ts and is driven
 // through this seam (a fake replaces it in the tests).
 const llm: LlmClient = {
@@ -67,8 +88,10 @@ const llm: LlmClient = {
 
 function printBanner() {
   console.log(chalk.cyan.bold(`\n  Mentor v${VERSION}`));
-  console.log(chalk.dim(`  Model: ${MODEL}`));
+  console.log(chalk.dim(`  Model: ${config.model}`));
   console.log(chalk.dim(`  CWD: ${process.cwd()}`));
+  if (projectContext) console.log(chalk.dim("  Loaded project memory (MENTOR.md / AGENTS.md)"));
+  if (config.autoApprove) console.log(chalk.yellow("  AUTO-APPROVE is ON — destructive actions run without confirmation"));
   console.log(chalk.dim("  Type /help for commands, Ctrl+C to exit\n"));
 }
 
@@ -208,17 +231,17 @@ function buildAgentContext(
     },
     execute: executeTool,
     tools: TOOL_DEFINITIONS as unknown as Anthropic.Tool[],
-    model: MODEL,
-    maxTokens: MAX_TOKENS,
+    model: config.model,
+    maxTokens: config.maxTokens,
     system: [
       {
         type: "text",
-        text: SYSTEM_PROMPT,
+        text: SYSTEM_TEXT,
         // Cache the system prompt — it never changes between turns
         cache_control: { type: "ephemeral" },
       },
     ],
-    autoApprove: AUTO_APPROVE,
+    autoApprove: config.autoApprove,
     destructiveTools: DESTRUCTIVE_TOOLS,
     onUsage: trackUsage,
   };

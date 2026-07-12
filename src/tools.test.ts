@@ -7,6 +7,7 @@ import {
   safeRegExp,
   includeToRegExp,
   isSensitivePath,
+  configureExtraDenylist,
   readFile,
   writeFile,
   editFile,
@@ -68,6 +69,19 @@ test("isSensitivePath flags denylisted names, extensions and prefixes", () => {
 
 test("isSensitivePath allows an ordinary file", () => {
   assert.equal(isSensitivePath(path.resolve(os.tmpdir(), "notes.txt")), false);
+});
+
+test("configureExtraDenylist extends the denied filenames", () => {
+  const target = path.resolve(os.tmpdir(), "company-secrets.json");
+  assert.equal(isSensitivePath(target), false);
+  configureExtraDenylist(["company-secrets.json"]);
+  try {
+    assert.equal(isSensitivePath(target), true);
+    // case-insensitive, like the built-in denylist
+    assert.equal(isSensitivePath(path.resolve(os.tmpdir(), "COMPANY-SECRETS.JSON")), true);
+  } finally {
+    configureExtraDenylist([]); // reset so other tests are unaffected
+  }
 });
 
 // ─── readFile offset/limit numbering ──────────────────────────────────────────

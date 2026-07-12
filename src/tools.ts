@@ -26,6 +26,14 @@ const DENYLIST_PREFIXES: string[] = [
 ];
 const DENYLIST_NAMES = new Set([".env", ".env.local", ".env.production", "id_rsa", "id_ed25519", "credentials"]);
 
+// Extra denied basenames, configured once at startup from .mentorrc.json. The
+// denylist can only ever grow — config cannot remove a built-in protection.
+let EXTRA_DENYLIST_NAMES = new Set<string>();
+
+export function configureExtraDenylist(names: string[]): void {
+  EXTRA_DENYLIST_NAMES = new Set(names.map((n) => n.toLowerCase()));
+}
+
 export function isSensitivePath(resolved: string): boolean {
   // Resolve symlinks so a link pointing at a sensitive file cannot bypass the
   // check. If the path does not exist yet (e.g. a new write), fall back to the
@@ -42,6 +50,7 @@ export function isSensitivePath(resolved: string): boolean {
     const lower = candidate.toLowerCase();
     const base = path.basename(lower);
     if (DENYLIST_NAMES.has(base)) return true;
+    if (EXTRA_DENYLIST_NAMES.has(base)) return true;
     if (base.endsWith(".pem") || base.endsWith(".key") || base.endsWith(".p12") || base.endsWith(".pfx")) return true;
     if (DENYLIST_PREFIXES.some(p => lower === p.toLowerCase() || lower.startsWith(p.toLowerCase() + path.sep))) return true;
   }
