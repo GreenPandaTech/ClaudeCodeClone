@@ -4,22 +4,28 @@ import readline from "readline";
 import Anthropic from "@anthropic-ai/sdk";
 import chalk from "chalk";
 import path from "path";
-import { TOOL_DEFINITIONS, executeTool } from "./tools.js";
+import { TOOL_DEFINITIONS, executeTool, configureExtraDenylist } from "./tools.js";
+import { formatDiff } from "./diff.js";
+import { classifyCommand } from "./safety.js";
+import { readForPreview } from "./preview.js";
+import { loadConfig, loadProjectContext, type MentorConfig } from "./config.js";
+import { parseArgs } from "./cli-args.js";
+import { saveSession, loadSession, listSessions } from "./session.js";
+import { estimateCost, type ModelUsage } from "./pricing.js";
+import { runAgenticLoop, runOnce, type AgentContext, type LlmClient, type LlmStream, type Message } from "./agent.js";
+import { VERSION } from "./version.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const MODEL = process.env.MODEL ?? "claude-sonnet-4-6";
-const MAX_TOKENS = 64_000;
-const VERSION = "1.0.0";
-
 // Tools that modify the system require explicit confirmation before running,
-// unless AUTO_APPROVE=1 (or --yes) is set.
+// unless autoApprove is set (via config, AUTO_APPROVE=1, or --yes).
 const DESTRUCTIVE_TOOLS = new Set(["bash", "write_file", "edit_file"]);
-const AUTO_APPROVE = process.env.AUTO_APPROVE === "1" || process.argv.includes("--yes");
 
 // ─── System prompt (cached — never changes, so stays at the front of the prefix) ──
+// Mentor is honest about being Mentor (an assistant built on the Anthropic API),
+// not the Claude Code product it is modelled on.
 
-const SYSTEM_PROMPT = `You are Claude Code, an expert AI coding assistant running in the user's terminal.
+const SYSTEM_PROMPT_BASE = `You are Mentor, an expert AI coding assistant running in the user's terminal, built on the Anthropic API.
 
 You have access to the following tools to help you work with their codebase:
 - read_file: Read file contents with line numbers
@@ -40,6 +46,24 @@ Guidelines:
 - When exploring an unfamiliar codebase, start with glob/grep to understand the structure
 - Prefer making atomic, focused changes over large sweeping rewrites`;
 
+// ─── CLI args (parsed before anything that needs an API key) ──────────────────
+
+const cliArgs = parseArgs(process.argv.slice(2));
+
+if (cliArgs.help) {
+  printCliHelp();
+  process.exit(0);
+}
+if (cliArgs.version) {
+  console.log(VERSION);
+  process.exit(0);
+}
+if (cliArgs.errors.length > 0) {
+  for (const e of cliArgs.errors) console.error(chalk.red(e));
+  console.error(chalk.dim("Run with --help for usage."));
+  process.exit(2);
+}
+
 // ─── Client ───────────────────────────────────────────────────────────────────
 
 if (!process.env.ANTHROPIC_API_KEY) {
@@ -52,50 +76,98 @@ if (!process.env.ANTHROPIC_API_KEY) {
 
 const client = new Anthropic();
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Resolved configuration and system prompt ─────────────────────────────────
 
-type Message = Anthropic.MessageParam;
+function loadConfigOrExit(): MentorConfig {
+  try {
+    return loadConfig(process.cwd(), process.env);
+  } catch (err) {
+    console.error(chalk.red("Configuration error: " + (err instanceof Error ? err.message : String(err))));
+    process.exit(1);
+  }
+}
+
+const config = loadConfigOrExit();
+configureExtraDenylist(config.extraDenylist);
+
+// Fold project memory (MENTOR.md / AGENTS.md) into the cached system prompt.
+const projectContext = loadProjectContext(process.cwd());
+const SYSTEM_TEXT = projectContext
+  ? `${SYSTEM_PROMPT_BASE}\n\n# Project context (from MENTOR.md / AGENTS.md)\n\n${projectContext}`
+  : SYSTEM_PROMPT_BASE;
+
+// Adapter over the real streaming API — the loop lives in agent.ts and is driven
+// through this seam (a fake replaces it in the tests).
+const llm: LlmClient = {
+  // The SDK's event union is wider than the loop needs; cast at this one seam.
+  stream: (params) => client.messages.stream(params) as unknown as LlmStream,
+};
 
 // ─── UI helpers ───────────────────────────────────────────────────────────────
 
 function printBanner() {
   console.log(chalk.cyan.bold(`\n  Mentor v${VERSION}`));
-  console.log(chalk.dim(`  Model: ${MODEL}`));
+  console.log(chalk.dim(`  Model: ${config.model}`));
   console.log(chalk.dim(`  CWD: ${process.cwd()}`));
+  if (projectContext) console.log(chalk.dim("  Loaded project memory (MENTOR.md / AGENTS.md)"));
+  if (config.autoApprove) console.log(chalk.yellow("  AUTO-APPROVE is ON — destructive actions run without confirmation"));
   console.log(chalk.dim("  Type /help for commands, Ctrl+C to exit\n"));
 }
 
 function printHelp() {
   console.log(chalk.bold("\nCommands:"));
-  console.log(chalk.cyan("  /help     ") + "Show this help");
-  console.log(chalk.cyan("  /clear    ") + "Clear conversation history");
-  console.log(chalk.cyan("  /cost     ") + "Show approximate token usage this session");
-  console.log(chalk.cyan("  /cwd <p>  ") + "Change the working directory");
-  console.log(chalk.cyan("  /exit     ") + "Exit the program\n");
+  console.log(chalk.cyan("  /help         ") + "Show this help");
+  console.log(chalk.cyan("  /clear        ") + "Clear conversation history");
+  console.log(chalk.cyan("  /cost         ") + "Show token usage and estimated cost per model");
+  console.log(chalk.cyan("  /cwd <path>   ") + "Change the working directory");
+  console.log(chalk.cyan("  /model [id]   ") + "Show or switch the model for later turns");
+  console.log(chalk.cyan("  /save [name]  ") + "Save this conversation to .mentor/sessions");
+  console.log(chalk.cyan("  /resume [name]") + " Load a saved conversation");
+  console.log(chalk.cyan("  /sessions     ") + "List saved sessions");
+  console.log(chalk.cyan("  /exit         ") + "Exit the program\n");
 }
 
 function printToolCall(name: string, input: Record<string, unknown>) {
   const label = chalk.yellow(`[tool: ${name}]`);
   const preview = getToolPreview(name, input);
   process.stdout.write(`\n${label} ${chalk.dim(preview)}\n`);
+
+  // Rich, colored diff preview before the user approves a file change.
+  if (name === "edit_file") {
+    printDiffPreview(String(input.old_string ?? ""), String(input.new_string ?? ""));
+  } else if (name === "write_file") {
+    // readForPreview applies the sensitive-path denylist, so overwriting a
+    // credential file never streams its contents to the terminal.
+    const existing = readForPreview(String(input.file_path));
+    printDiffPreview(existing, String(input.content ?? ""));
+  } else if (name === "bash") {
+    const risk = classifyCommand(String(input.command ?? ""));
+    if (risk.level !== "normal") {
+      const paint = risk.level === "danger" ? chalk.red.bold : chalk.yellow;
+      process.stdout.write("  " + paint(`⚠ ${risk.level.toUpperCase()}: ${risk.reason}`) + "\n");
+    }
+  }
+}
+
+// Print a colored, context-folded unified diff (green additions, red removals).
+function printDiffPreview(oldText: string, newText: string) {
+  const diff = formatDiff(oldText, newText, { context: 2 });
+  if (!diff) return;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+")) process.stdout.write("  " + chalk.green(line) + "\n");
+    else if (line.startsWith("-")) process.stdout.write("  " + chalk.red(line) + "\n");
+    else process.stdout.write("  " + chalk.dim(line) + "\n");
+  }
 }
 
 function getToolPreview(name: string, input: Record<string, unknown>): string {
   switch (name) {
     case "read_file":
       return String(input.file_path);
-    case "write_file": {
-      const content = String(input.content ?? "");
-      const lines = content.split("\n");
-      const preview = lines.slice(0, 3).join("\n  ");
-      const tail = lines.length > 3 ? `\n  … (${lines.length} lines total)` : "";
-      return `${input.file_path}\n  ${preview}${tail}`;
-    }
-    case "edit_file": {
-      const oldLine = String(input.old_string ?? "").split("\n")[0];
-      const newLine = String(input.new_string ?? "").split("\n")[0];
-      return `${input.file_path}\n  - ${oldLine}\n  + ${newLine}`;
-    }
+    case "write_file":
+      return String(input.file_path);
+    case "edit_file":
+      return String(input.file_path);
     case "bash": {
       // Show the full command — never truncate, so the user sees what they're approving.
       const cmd = String(input.command ?? "");
@@ -125,129 +197,88 @@ function printToolResult(result: { output: string; isError?: boolean }) {
   }
 }
 
-// ─── Token tracking ───────────────────────────────────────────────────────────
+// ─── Token tracking (per model, so /cost is accurate across model switches) ────
 
-interface Usage {
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-}
+const usageByModel: Record<string, ModelUsage> = {};
 
-const sessionUsage: Usage = {
-  inputTokens: 0,
-  outputTokens: 0,
-  cacheReadTokens: 0,
-  cacheWriteTokens: 0,
-};
-
-function trackUsage(usage: Anthropic.Usage) {
-  sessionUsage.inputTokens += usage.input_tokens;
-  sessionUsage.outputTokens += usage.output_tokens;
-  sessionUsage.cacheReadTokens += usage.cache_read_input_tokens ?? 0;
-  sessionUsage.cacheWriteTokens += usage.cache_creation_input_tokens ?? 0;
+function trackUsage(model: string, usage: Anthropic.Usage) {
+  const u = (usageByModel[model] ??= {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+  });
+  u.inputTokens += usage.input_tokens;
+  u.outputTokens += usage.output_tokens;
+  u.cacheReadTokens += usage.cache_read_input_tokens ?? 0;
+  u.cacheWriteTokens += usage.cache_creation_input_tokens ?? 0;
 }
 
 function printCost() {
-  // Approximate Claude Sonnet 4.6 pricing (the default model): $3/1M input, $15/1M output, $0.30/1M cache read
-  const inputCost = (sessionUsage.inputTokens / 1_000_000) * 3.0;
-  const outputCost = (sessionUsage.outputTokens / 1_000_000) * 15.0;
-  const cacheReadCost = (sessionUsage.cacheReadTokens / 1_000_000) * 0.3;
-  const total = inputCost + outputCost + cacheReadCost;
-
+  const est = estimateCost(usageByModel);
+  if (est.lines.length === 0) {
+    console.log(chalk.dim("\nNo usage yet this session.\n"));
+    return;
+  }
   console.log(chalk.bold("\nSession usage:"));
-  console.log(`  Input tokens:       ${sessionUsage.inputTokens.toLocaleString()}`);
-  console.log(`  Output tokens:      ${sessionUsage.outputTokens.toLocaleString()}`);
-  console.log(`  Cache read tokens:  ${sessionUsage.cacheReadTokens.toLocaleString()}`);
-  console.log(`  Cache write tokens: ${sessionUsage.cacheWriteTokens.toLocaleString()}`);
-  console.log(chalk.cyan(`  Estimated cost:     $${total.toFixed(4)}\n`));
+  for (const line of est.lines) {
+    const label = line.known ? line.model : `${line.model}${chalk.yellow(" (est.)")}`;
+    console.log(`  ${label}`);
+    console.log(
+      chalk.dim(
+        `    in ${line.usage.inputTokens.toLocaleString()}  out ${line.usage.outputTokens.toLocaleString()}` +
+          `  cache-read ${line.usage.cacheReadTokens.toLocaleString()}  cache-write ${line.usage.cacheWriteTokens.toLocaleString()}`,
+      ),
+    );
+    console.log(`    cost $${line.cost.toFixed(4)}`);
+  }
+  console.log(chalk.cyan(`  Total estimated cost: $${est.total.toFixed(4)}`));
+  if (est.anyUnknown) {
+    console.log(chalk.dim("  (est.) = model not in the price table; Sonnet-class rates assumed"));
+  }
+  console.log("");
 }
 
-// ─── Agentic loop ─────────────────────────────────────────────────────────────
+// ─── Agent context factory ────────────────────────────────────────────────────
+// Builds the dependency-injected context that drives the loop in agent.ts.
 
-async function runAgenticLoop(
-  messages: Message[],
-  onText: (text: string) => void,
+function buildAgentContext(
   confirm: (name: string, input: Record<string, unknown>) => Promise<boolean>
-): Promise<void> {
-  while (true) {
-    const stream = await client.messages.stream({
-      model: MODEL,
-      max_tokens: MAX_TOKENS,
-      system: [
-        {
-          type: "text",
-          text: SYSTEM_PROMPT,
-          // Cache the system prompt — it never changes between turns
-          cache_control: { type: "ephemeral" },
-        },
-      ],
-      tools: TOOL_DEFINITIONS as unknown as Anthropic.Tool[],
-      messages,
-    });
-
-    // Stream text to terminal in real time
-    let currentBlockType: string | null = null;
-    for await (const event of stream) {
-      if (event.type === "content_block_start") {
-        currentBlockType = event.content_block.type;
-      }
-      if (
-        event.type === "content_block_delta" &&
-        event.delta.type === "text_delta" &&
-        currentBlockType === "text"
-      ) {
-        onText(event.delta.text);
-      }
-    }
-
-    const finalMsg = await stream.finalMessage();
-    trackUsage(finalMsg.usage);
-
-    // Append assistant response to history
-    messages.push({ role: "assistant", content: finalMsg.content });
-
-    if (finalMsg.stop_reason !== "tool_use") {
-      // Done — no more tool calls
-      process.stdout.write("\n");
-      break;
-    }
-
-    // Execute all tool calls and collect results
-    const toolResults: Anthropic.ToolResultBlockParam[] = [];
-    for (const block of finalMsg.content) {
-      if (block.type !== "tool_use") continue;
-
-      printToolCall(block.name, block.input as Record<string, unknown>);
-
-      if (DESTRUCTIVE_TOOLS.has(block.name) && !AUTO_APPROVE) {
-        const approved = await confirm(block.name, block.input as Record<string, unknown>);
-        if (!approved) {
-          printToolResult({ output: "Skipped — declined by user.", isError: true });
-          toolResults.push({
-            type: "tool_result",
-            tool_use_id: block.id,
-            content: "User declined to run this action.",
-            is_error: true,
-          });
-          continue;
-        }
-      }
-
-      const result = await executeTool(block.name, block.input as Record<string, unknown>);
-      printToolResult(result);
-
-      toolResults.push({
-        type: "tool_result",
-        tool_use_id: block.id,
-        content: result.output,
-        is_error: result.isError,
-      });
-    }
-
-    // Feed results back and loop
-    messages.push({ role: "user", content: toolResults });
-  }
+): AgentContext {
+  return {
+    client: llm,
+    io: {
+      onText: (text) => process.stdout.write(text),
+      onToolCall: (name, input) => printToolCall(name, input),
+      onToolResult: (result) => printToolResult(result),
+      confirm,
+    },
+    execute: executeTool,
+    tools: TOOL_DEFINITIONS as unknown as Anthropic.Tool[],
+    model: config.model,
+    maxTokens: config.maxTokens,
+    system: [
+      {
+        type: "text",
+        text: SYSTEM_TEXT,
+        // Cache the system prompt — it never changes between turns
+        cache_control: { type: "ephemeral" },
+      },
+    ],
+    autoApprove: config.autoApprove,
+    destructiveTools: DESTRUCTIVE_TOOLS,
+    onUsage: (usage) => trackUsage(config.model, usage),
+    retry: {
+      maxRetries: 3,
+      baseDelayMs: 500,
+      onRetry: (attempt, delayMs, err) => {
+        const reason = err instanceof Error ? err.message : String(err);
+        process.stderr.write(
+          chalk.yellow(`\n  ⟳ transient API error (${reason}); retry ${attempt} in ${delayMs}ms…\n`),
+        );
+      },
+    },
+  };
 }
 
 // ─── Main REPL ────────────────────────────────────────────────────────────────
@@ -256,6 +287,17 @@ async function main() {
   printBanner();
 
   const messages: Message[] = [];
+
+  // Seed from a saved session when --resume <name> was passed.
+  if (cliArgs.resume) {
+    try {
+      const data = loadSession(process.cwd(), cliArgs.resume);
+      messages.push(...data.messages);
+      console.log(chalk.dim(`Resumed session "${cliArgs.resume}" (${messages.length} messages).`));
+    } catch (err) {
+      console.log(chalk.red(String(err instanceof Error ? err.message : err)));
+    }
+  }
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -324,6 +366,47 @@ async function main() {
           break;
         }
 
+        case "save": {
+          const name = (args.join(" ").trim() || "last").replace(/\s+/g, "-");
+          try {
+            const file = saveSession(process.cwd(), name, config.model, messages);
+            console.log(chalk.dim(`Saved session "${name}" (${messages.length} messages) → ${file}`));
+          } catch (err) {
+            console.log(chalk.red(String(err instanceof Error ? err.message : err)));
+          }
+          break;
+        }
+
+        case "resume": {
+          const name = (args.join(" ").trim() || "last").replace(/\s+/g, "-");
+          try {
+            const data = loadSession(process.cwd(), name);
+            messages.length = 0;
+            messages.push(...data.messages);
+            console.log(chalk.dim(`Resumed session "${name}" (${messages.length} messages).`));
+          } catch (err) {
+            console.log(chalk.red(String(err instanceof Error ? err.message : err)));
+          }
+          break;
+        }
+
+        case "sessions": {
+          const names = listSessions(process.cwd());
+          console.log(names.length ? "Saved sessions:\n  " + names.join("\n  ") : chalk.dim("No saved sessions."));
+          break;
+        }
+
+        case "model": {
+          const name = args.join(" ").trim();
+          if (!name) {
+            console.log(chalk.dim(`Current model: ${config.model}`));
+          } else {
+            config.model = name;
+            console.log(chalk.dim(`Model set to ${name} for subsequent turns.`));
+          }
+          break;
+        }
+
         case "exit":
         case "quit":
           printCost();
@@ -338,7 +421,7 @@ async function main() {
       return;
     }
 
-    // ── Send to Claude ───────────────────────────────────────────────────────
+    // ── Send to the model ─────────────────────────────────────────────────────
     messages.push({ role: "user", content: input });
 
     // Add cache breakpoint on the last user message to cache the conversation
@@ -354,14 +437,11 @@ async function main() {
       ];
     }
 
-    process.stdout.write(chalk.cyan("\nClaude: "));
+    process.stdout.write(chalk.cyan("\nMentor: "));
 
     try {
-      await runAgenticLoop(
-        messages,
-        (text) => process.stdout.write(text),
-        confirmAction
-      );
+      await runAgenticLoop(messages, buildAgentContext(confirmAction));
+      process.stdout.write("\n");
     } catch (err) {
       if (err instanceof Anthropic.APIError) {
         console.error(chalk.red(`\nAPI Error ${err.status}: ${err.message}`));
@@ -385,7 +465,76 @@ async function main() {
   prompt();
 }
 
-main().catch((err) => {
+// ─── Non-interactive (print) mode ─────────────────────────────────────────────
+
+function printCliHelp() {
+  console.log(`Mentor v${VERSION} — a terminal AI coding assistant on the Anthropic API
+
+Usage:
+  mentor                     Start the interactive REPL
+  mentor -p "<prompt>"       Run a single prompt and print the result, then exit
+  echo "<prompt>" | mentor   Same, reading the prompt from stdin
+
+Options:
+  -p, --print <prompt>   One-shot mode: answer the prompt and exit
+  --model <id>           Override the model for this run
+  --resume <name>        Resume a saved session
+  -y, --yes              Approve destructive actions without prompting
+  -h, --help             Show this help
+  -v, --version          Show the version
+
+In one-shot mode the assistant's text goes to stdout and tool activity to
+stderr, so you can pipe the answer. Destructive tools are skipped unless --yes.`);
+}
+
+function readStdin(): Promise<string> {
+  return new Promise((resolve) => {
+    let data = "";
+    process.stdin.setEncoding("utf-8");
+    process.stdin.on("data", (chunk) => (data += chunk));
+    process.stdin.on("end", () => resolve(data));
+  });
+}
+
+// One-shot context: assistant text to stdout, tool activity to stderr (so the
+// answer can be piped cleanly), and no interactive confirmation.
+function buildPrintContext(): AgentContext {
+  return {
+    ...buildAgentContext(async () => config.autoApprove),
+    io: {
+      onText: (text) => process.stdout.write(text),
+      onToolCall: (name, input) =>
+        process.stderr.write(chalk.yellow(`\n[tool: ${name}] `) + chalk.dim(getToolPreview(name, input)) + "\n"),
+      onToolResult: (result) =>
+        process.stderr.write(result.isError ? chalk.red("  ✗ tool error\n") : chalk.dim("  ✓\n")),
+      confirm: async () => config.autoApprove,
+    },
+  };
+}
+
+async function bootstrap() {
+  // CLI flags override the resolved config for this run (help/version/errors
+  // were already handled at startup, before the API-key check).
+  if (cliArgs.model) config.model = cliArgs.model;
+  if (cliArgs.yes) config.autoApprove = true;
+
+  // One-shot mode when -p is given or input is piped (not a TTY).
+  const piped = !process.stdin.isTTY;
+  if (cliArgs.print != null || piped) {
+    const promptText = cliArgs.print != null ? cliArgs.print : await readStdin();
+    if (!promptText.trim()) {
+      console.error(chalk.red("No prompt provided. Use -p \"<prompt>\" or pipe input, or run with --help."));
+      process.exit(2);
+    }
+    const code = await runOnce(promptText, buildPrintContext());
+    process.stdout.write("\n");
+    process.exit(code);
+  }
+
+  await main();
+}
+
+bootstrap().catch((err) => {
   console.error(chalk.red("Fatal: " + String(err)));
   process.exit(1);
 });

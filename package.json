@@ -1,6 +1,6 @@
 {
   "name": "mentor",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "A local Claude Code style AI coding assistant CLI powered by the Anthropic API",
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",
@@ -11,7 +11,9 @@
     "build": "tsc",
     "start": "node --enable-source-maps dist/index.js",
     "dev": "tsc --watch",
-    "test": "node --test dist/tools.test.js"
+    "lint": "eslint .",
+    "pretest": "tsc",
+    "test": "node --test \"dist/**/*.test.js\""
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.109.0",
@@ -19,7 +21,10 @@
     "dotenv": "^16.4.5"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^22.10.0",
-    "typescript": "^5.7.2"
+    "eslint": "^10.7.0",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.63.0"
   }
 }
