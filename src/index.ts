@@ -5,12 +5,12 @@ import Anthropic from "@anthropic-ai/sdk";
 import chalk from "chalk";
 import path from "path";
 import { TOOL_DEFINITIONS, executeTool } from "./tools.js";
+import { VERSION } from "./version.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const MODEL = process.env.MODEL ?? "claude-sonnet-4-6";
 const MAX_TOKENS = 64_000;
-const VERSION = "1.0.0";
 
 // Tools that modify the system require explicit confirmation before running,
 // unless AUTO_APPROVE=1 (or --yes) is set.
