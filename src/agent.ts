@@ -46,6 +46,17 @@ export interface AgentIO {
   confirm(name: string, input: Record<string, unknown>): Promise<boolean>;
 }
 
+export interface RetryOptions {
+  /** Maximum number of retries after the first attempt (default 3). */
+  maxRetries?: number;
+  /** Base backoff in ms; attempt N waits baseDelayMs * 2^(N-1) (default 500). */
+  baseDelayMs?: number;
+  /** Injected sleep (real setTimeout in production, a no-op in tests). */
+  sleep?: (ms: number) => Promise<void>;
+  /** Notified before each retry (for a "retrying…" message). */
+  onRetry?: (attempt: number, delayMs: number, err: unknown) => void;
+}
+
 export interface AgentContext {
   client: LlmClient;
   io: AgentIO;
@@ -57,6 +68,73 @@ export interface AgentContext {
   autoApprove: boolean;
   destructiveTools: Set<string>;
   onUsage?: (usage: Anthropic.Usage) => void;
+  retry?: RetryOptions;
+}
+
+// Transient HTTP statuses worth retrying: rate limit, overloaded, and 5xx.
+const RETRIABLE_STATUS = new Set([408, 409, 429, 500, 502, 503, 504, 529]);
+
+function isRetriable(err: unknown): boolean {
+  if (err && typeof err === "object" && "status" in err) {
+    const status = (err as { status: unknown }).status;
+    if (typeof status === "number" && RETRIABLE_STATUS.has(status)) return true;
+  }
+  // Network-level failures (no status) and explicit overload messages.
+  const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+  return /overloaded|econnreset|etimedout|network|socket hang up/.test(msg);
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Run one model turn (stream + finalMessage), retrying transient failures with
+// exponential backoff. Only retries when nothing has been emitted yet, so a
+// mid-stream failure never double-prints text.
+async function streamTurn(messages: Message[], ctx: AgentContext): Promise<Anthropic.Message> {
+  const maxRetries = ctx.retry?.maxRetries ?? 3;
+  const baseDelay = ctx.retry?.baseDelayMs ?? 500;
+  const sleep = ctx.retry?.sleep ?? defaultSleep;
+  let attempt = 0;
+
+  while (true) {
+    let emitted = false;
+    try {
+      const stream = ctx.client.stream({
+        model: ctx.model,
+        max_tokens: ctx.maxTokens,
+        system: ctx.system,
+        tools: ctx.tools,
+        messages,
+      });
+
+      let currentBlockType: string | null = null;
+      for await (const event of stream) {
+        if (event.type === "content_block_start") {
+          currentBlockType = event.content_block?.type ?? null;
+        }
+        if (
+          event.type === "content_block_delta" &&
+          event.delta?.type === "text_delta" &&
+          currentBlockType === "text"
+        ) {
+          emitted = true;
+          ctx.io.onText(event.delta.text ?? "");
+        }
+      }
+
+      return await stream.finalMessage();
+    } catch (err) {
+      if (!emitted && attempt < maxRetries && isRetriable(err)) {
+        const delayMs = baseDelay * 2 ** attempt;
+        attempt++;
+        ctx.retry?.onRetry?.(attempt, delayMs, err);
+        await sleep(delayMs);
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
 // ─── The agentic loop ─────────────────────────────────────────────────────────
@@ -66,30 +144,8 @@ export interface AgentContext {
 
 export async function runAgenticLoop(messages: Message[], ctx: AgentContext): Promise<void> {
   while (true) {
-    const stream = ctx.client.stream({
-      model: ctx.model,
-      max_tokens: ctx.maxTokens,
-      system: ctx.system,
-      tools: ctx.tools,
-      messages,
-    });
-
-    // Stream assistant text to the IO layer in real time.
-    let currentBlockType: string | null = null;
-    for await (const event of stream) {
-      if (event.type === "content_block_start") {
-        currentBlockType = event.content_block?.type ?? null;
-      }
-      if (
-        event.type === "content_block_delta" &&
-        event.delta?.type === "text_delta" &&
-        currentBlockType === "text"
-      ) {
-        ctx.io.onText(event.delta.text ?? "");
-      }
-    }
-
-    const finalMsg = await stream.finalMessage();
+    // Stream one turn, transparently retrying transient API failures.
+    const finalMsg = await streamTurn(messages, ctx);
     ctx.onUsage?.(finalMsg.usage);
 
     messages.push({ role: "assistant", content: finalMsg.content });

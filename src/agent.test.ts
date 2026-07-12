@@ -76,6 +76,7 @@ interface HarnessOpts {
   execute?: (name: string, input: Record<string, unknown>) => Promise<ToolResult>;
   autoApprove?: boolean;
   onUsage?: (usage: Anthropic.Usage) => void;
+  retry?: AgentContext["retry"];
 }
 
 function makeHarness(client: LlmClient, opts: HarnessOpts = {}) {
@@ -98,8 +99,28 @@ function makeHarness(client: LlmClient, opts: HarnessOpts = {}) {
     autoApprove: opts.autoApprove ?? false,
     destructiveTools: new Set(["bash", "write_file", "edit_file"]),
     onUsage: opts.onUsage,
+    retry: opts.retry,
   };
   return { ctx, textOut, toolCalls, toolResults };
+}
+
+// A client that throws a (retriable or not) error for the first N stream calls,
+// then delegates to a working fake.
+class FlakyLlmClient implements LlmClient {
+  attempts = 0;
+  constructor(
+    private failTimes: number,
+    private status: number,
+    private then: FakeLlmClient,
+  ) {}
+  stream(params: { messages: Message[] }): LlmStream {
+    if (this.attempts++ < this.failTimes) {
+      const err = new Error(`http ${this.status}`) as Error & { status: number };
+      err.status = this.status;
+      throw err;
+    }
+    return this.then.stream(params);
+  }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -309,4 +330,49 @@ test("runOnce returns a non-zero code when the model call fails", async () => {
   const code = await runOnce("hi", ctx);
 
   assert.equal(code, 1);
+});
+
+test("a retriable API error is retried with backoff and then succeeds", async () => {
+  const good = new FakeLlmClient([{ text: "recovered" }]);
+  const client = new FlakyLlmClient(2, 529, good); // overloaded twice, then ok
+  const delays: number[] = [];
+  const { ctx, textOut } = makeHarness(client, {
+    retry: {
+      maxRetries: 3,
+      baseDelayMs: 10,
+      sleep: async (ms) => {
+        delays.push(ms);
+      },
+    },
+  });
+
+  await runAgenticLoop([{ role: "user", content: "go" }], ctx);
+
+  assert.equal(client.attempts, 3); // 2 failures + 1 success
+  assert.equal(textOut.join(""), "recovered");
+  assert.deepEqual(delays, [10, 20]); // exponential backoff
+});
+
+test("a non-retriable error is not retried", async () => {
+  const good = new FakeLlmClient([{ text: "never" }]);
+  const client = new FlakyLlmClient(1, 400, good); // bad request — do not retry
+  let slept = 0;
+  const { ctx } = makeHarness(client, {
+    retry: { maxRetries: 3, baseDelayMs: 10, sleep: async () => { slept++; } },
+  });
+
+  await assert.rejects(runAgenticLoop([{ role: "user", content: "go" }], ctx));
+  assert.equal(slept, 0);
+  assert.equal(client.attempts, 1);
+});
+
+test("retries are bounded and the error propagates once exhausted", async () => {
+  const good = new FakeLlmClient([{ text: "unreached" }]);
+  const client = new FlakyLlmClient(99, 503, good); // always fails
+  const { ctx } = makeHarness(client, {
+    retry: { maxRetries: 2, baseDelayMs: 1, sleep: async () => {} },
+  });
+
+  await assert.rejects(runAgenticLoop([{ role: "user", content: "go" }], ctx));
+  assert.equal(client.attempts, 3); // initial + 2 retries
 });

@@ -271,6 +271,16 @@ function buildAgentContext(
     autoApprove: config.autoApprove,
     destructiveTools: DESTRUCTIVE_TOOLS,
     onUsage: (usage) => trackUsage(config.model, usage),
+    retry: {
+      maxRetries: 3,
+      baseDelayMs: 500,
+      onRetry: (attempt, delayMs, err) => {
+        const reason = err instanceof Error ? err.message : String(err);
+        process.stderr.write(
+          chalk.yellow(`\n  ⟳ transient API error (${reason}); retry ${attempt} in ${delayMs}ms…\n`),
+        );
+      },
+    },
   };
 }
 
