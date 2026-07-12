@@ -10,6 +10,7 @@ import { formatDiff } from "./diff.js";
 import { classifyCommand } from "./safety.js";
 import { loadConfig, loadProjectContext, type MentorConfig } from "./config.js";
 import { parseArgs } from "./cli-args.js";
+import { saveSession, loadSession, listSessions } from "./session.js";
 import { runAgenticLoop, runOnce, type AgentContext, type LlmClient, type LlmStream, type Message } from "./agent.js";
 import { VERSION } from "./version.js";
 
@@ -114,11 +115,14 @@ function printBanner() {
 
 function printHelp() {
   console.log(chalk.bold("\nCommands:"));
-  console.log(chalk.cyan("  /help     ") + "Show this help");
-  console.log(chalk.cyan("  /clear    ") + "Clear conversation history");
-  console.log(chalk.cyan("  /cost     ") + "Show approximate token usage this session");
-  console.log(chalk.cyan("  /cwd <p>  ") + "Change the working directory");
-  console.log(chalk.cyan("  /exit     ") + "Exit the program\n");
+  console.log(chalk.cyan("  /help         ") + "Show this help");
+  console.log(chalk.cyan("  /clear        ") + "Clear conversation history");
+  console.log(chalk.cyan("  /cost         ") + "Show approximate token usage this session");
+  console.log(chalk.cyan("  /cwd <path>   ") + "Change the working directory");
+  console.log(chalk.cyan("  /save [name]  ") + "Save this conversation to .mentor/sessions");
+  console.log(chalk.cyan("  /resume [name]") + " Load a saved conversation");
+  console.log(chalk.cyan("  /sessions     ") + "List saved sessions");
+  console.log(chalk.cyan("  /exit         ") + "Exit the program\n");
 }
 
 function printToolCall(name: string, input: Record<string, unknown>) {
@@ -271,6 +275,17 @@ async function main() {
 
   const messages: Message[] = [];
 
+  // Seed from a saved session when --resume <name> was passed.
+  if (cliArgs.resume) {
+    try {
+      const data = loadSession(process.cwd(), cliArgs.resume);
+      messages.push(...data.messages);
+      console.log(chalk.dim(`Resumed session "${cliArgs.resume}" (${messages.length} messages).`));
+    } catch (err) {
+      console.log(chalk.red(String(err instanceof Error ? err.message : err)));
+    }
+  }
+
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -335,6 +350,36 @@ async function main() {
           } else {
             console.log(process.cwd());
           }
+          break;
+        }
+
+        case "save": {
+          const name = (args.join(" ").trim() || "last").replace(/\s+/g, "-");
+          try {
+            const file = saveSession(process.cwd(), name, config.model, messages);
+            console.log(chalk.dim(`Saved session "${name}" (${messages.length} messages) → ${file}`));
+          } catch (err) {
+            console.log(chalk.red(String(err instanceof Error ? err.message : err)));
+          }
+          break;
+        }
+
+        case "resume": {
+          const name = (args.join(" ").trim() || "last").replace(/\s+/g, "-");
+          try {
+            const data = loadSession(process.cwd(), name);
+            messages.length = 0;
+            messages.push(...data.messages);
+            console.log(chalk.dim(`Resumed session "${name}" (${messages.length} messages).`));
+          } catch (err) {
+            console.log(chalk.red(String(err instanceof Error ? err.message : err)));
+          }
+          break;
+        }
+
+        case "sessions": {
+          const names = listSessions(process.cwd());
+          console.log(names.length ? "Saved sessions:\n  " + names.join("\n  ") : chalk.dim("No saved sessions."));
           break;
         }
 
