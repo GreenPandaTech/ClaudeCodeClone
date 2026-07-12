@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 import "dotenv/config";
 import readline from "readline";
+import fs from "fs";
 import Anthropic from "@anthropic-ai/sdk";
 import chalk from "chalk";
 import path from "path";
 import { TOOL_DEFINITIONS, executeTool } from "./tools.js";
+import { formatDiff } from "./diff.js";
+import { classifyCommand } from "./safety.js";
 import { runAgenticLoop, type AgentContext, type LlmClient, type LlmStream, type Message } from "./agent.js";
 import { VERSION } from "./version.js";
 
@@ -82,24 +85,46 @@ function printToolCall(name: string, input: Record<string, unknown>) {
   const label = chalk.yellow(`[tool: ${name}]`);
   const preview = getToolPreview(name, input);
   process.stdout.write(`\n${label} ${chalk.dim(preview)}\n`);
+
+  // Rich, colored diff preview before the user approves a file change.
+  if (name === "edit_file") {
+    printDiffPreview(String(input.old_string ?? ""), String(input.new_string ?? ""));
+  } else if (name === "write_file") {
+    let existing = "";
+    try {
+      existing = fs.readFileSync(path.resolve(String(input.file_path)), "utf-8");
+    } catch {
+      /* new file — diff against empty */
+    }
+    printDiffPreview(existing, String(input.content ?? ""));
+  } else if (name === "bash") {
+    const risk = classifyCommand(String(input.command ?? ""));
+    if (risk.level !== "normal") {
+      const paint = risk.level === "danger" ? chalk.red.bold : chalk.yellow;
+      process.stdout.write("  " + paint(`⚠ ${risk.level.toUpperCase()}: ${risk.reason}`) + "\n");
+    }
+  }
+}
+
+// Print a colored, context-folded unified diff (green additions, red removals).
+function printDiffPreview(oldText: string, newText: string) {
+  const diff = formatDiff(oldText, newText, { context: 2 });
+  if (!diff) return;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+")) process.stdout.write("  " + chalk.green(line) + "\n");
+    else if (line.startsWith("-")) process.stdout.write("  " + chalk.red(line) + "\n");
+    else process.stdout.write("  " + chalk.dim(line) + "\n");
+  }
 }
 
 function getToolPreview(name: string, input: Record<string, unknown>): string {
   switch (name) {
     case "read_file":
       return String(input.file_path);
-    case "write_file": {
-      const content = String(input.content ?? "");
-      const lines = content.split("\n");
-      const preview = lines.slice(0, 3).join("\n  ");
-      const tail = lines.length > 3 ? `\n  … (${lines.length} lines total)` : "";
-      return `${input.file_path}\n  ${preview}${tail}`;
-    }
-    case "edit_file": {
-      const oldLine = String(input.old_string ?? "").split("\n")[0];
-      const newLine = String(input.new_string ?? "").split("\n")[0];
-      return `${input.file_path}\n  - ${oldLine}\n  + ${newLine}`;
-    }
+    case "write_file":
+      return String(input.file_path);
+    case "edit_file":
+      return String(input.file_path);
     case "bash": {
       // Show the full command — never truncate, so the user sees what they're approving.
       const cmd = String(input.command ?? "");
