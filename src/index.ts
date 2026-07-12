@@ -9,7 +9,8 @@ import { TOOL_DEFINITIONS, executeTool, configureExtraDenylist } from "./tools.j
 import { formatDiff } from "./diff.js";
 import { classifyCommand } from "./safety.js";
 import { loadConfig, loadProjectContext, type MentorConfig } from "./config.js";
-import { runAgenticLoop, type AgentContext, type LlmClient, type LlmStream, type Message } from "./agent.js";
+import { parseArgs } from "./cli-args.js";
+import { runAgenticLoop, runOnce, type AgentContext, type LlmClient, type LlmStream, type Message } from "./agent.js";
 import { VERSION } from "./version.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -43,6 +44,24 @@ Guidelines:
 - When exploring an unfamiliar codebase, start with glob/grep to understand the structure
 - Prefer making atomic, focused changes over large sweeping rewrites`;
 
+// ─── CLI args (parsed before anything that needs an API key) ──────────────────
+
+const cliArgs = parseArgs(process.argv.slice(2));
+
+if (cliArgs.help) {
+  printCliHelp();
+  process.exit(0);
+}
+if (cliArgs.version) {
+  console.log(VERSION);
+  process.exit(0);
+}
+if (cliArgs.errors.length > 0) {
+  for (const e of cliArgs.errors) console.error(chalk.red(e));
+  console.error(chalk.dim("Run with --help for usage."));
+  process.exit(2);
+}
+
 // ─── Client ───────────────────────────────────────────────────────────────────
 
 if (!process.env.ANTHROPIC_API_KEY) {
@@ -59,9 +78,7 @@ const client = new Anthropic();
 
 function loadConfigOrExit(): MentorConfig {
   try {
-    const cfg = loadConfig(process.cwd(), process.env);
-    if (process.argv.includes("--yes")) cfg.autoApprove = true;
-    return cfg;
+    return loadConfig(process.cwd(), process.env);
   } catch (err) {
     console.error(chalk.red("Configuration error: " + (err instanceof Error ? err.message : String(err))));
     process.exit(1);
@@ -379,7 +396,76 @@ async function main() {
   prompt();
 }
 
-main().catch((err) => {
+// ─── Non-interactive (print) mode ─────────────────────────────────────────────
+
+function printCliHelp() {
+  console.log(`Mentor v${VERSION} — a terminal AI coding assistant on the Anthropic API
+
+Usage:
+  mentor                     Start the interactive REPL
+  mentor -p "<prompt>"       Run a single prompt and print the result, then exit
+  echo "<prompt>" | mentor   Same, reading the prompt from stdin
+
+Options:
+  -p, --print <prompt>   One-shot mode: answer the prompt and exit
+  --model <id>           Override the model for this run
+  --resume <name>        Resume a saved session
+  -y, --yes              Approve destructive actions without prompting
+  -h, --help             Show this help
+  -v, --version          Show the version
+
+In one-shot mode the assistant's text goes to stdout and tool activity to
+stderr, so you can pipe the answer. Destructive tools are skipped unless --yes.`);
+}
+
+function readStdin(): Promise<string> {
+  return new Promise((resolve) => {
+    let data = "";
+    process.stdin.setEncoding("utf-8");
+    process.stdin.on("data", (chunk) => (data += chunk));
+    process.stdin.on("end", () => resolve(data));
+  });
+}
+
+// One-shot context: assistant text to stdout, tool activity to stderr (so the
+// answer can be piped cleanly), and no interactive confirmation.
+function buildPrintContext(): AgentContext {
+  return {
+    ...buildAgentContext(async () => config.autoApprove),
+    io: {
+      onText: (text) => process.stdout.write(text),
+      onToolCall: (name, input) =>
+        process.stderr.write(chalk.yellow(`\n[tool: ${name}] `) + chalk.dim(getToolPreview(name, input)) + "\n"),
+      onToolResult: (result) =>
+        process.stderr.write(result.isError ? chalk.red("  ✗ tool error\n") : chalk.dim("  ✓\n")),
+      confirm: async () => config.autoApprove,
+    },
+  };
+}
+
+async function bootstrap() {
+  // CLI flags override the resolved config for this run (help/version/errors
+  // were already handled at startup, before the API-key check).
+  if (cliArgs.model) config.model = cliArgs.model;
+  if (cliArgs.yes) config.autoApprove = true;
+
+  // One-shot mode when -p is given or input is piped (not a TTY).
+  const piped = !process.stdin.isTTY;
+  if (cliArgs.print != null || piped) {
+    const promptText = cliArgs.print != null ? cliArgs.print : await readStdin();
+    if (!promptText.trim()) {
+      console.error(chalk.red("No prompt provided. Use -p \"<prompt>\" or pipe input, or run with --help."));
+      process.exit(2);
+    }
+    const code = await runOnce(promptText, buildPrintContext());
+    process.stdout.write("\n");
+    process.exit(code);
+  }
+
+  await main();
+}
+
+bootstrap().catch((err) => {
   console.error(chalk.red("Fatal: " + String(err)));
   process.exit(1);
 });

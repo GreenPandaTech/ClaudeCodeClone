@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type Anthropic from "@anthropic-ai/sdk";
 import {
   runAgenticLoop,
+  runOnce,
   type LlmClient,
   type LlmStream,
   type AgentContext,
@@ -283,4 +284,29 @@ test("executes multiple tool calls from a single turn in order", async () => {
   assert.equal(fedBack.length, 2);
   assert.equal(fedBack[0].tool_use_id, "t1");
   assert.equal(fedBack[1].tool_use_id, "t2");
+});
+
+// A client that always throws — models an API failure in one-shot mode.
+class ThrowingLlmClient implements LlmClient {
+  stream(): LlmStream {
+    throw new Error("network down");
+  }
+}
+
+test("runOnce returns 0 and emits the answer on success", async () => {
+  const client = new FakeLlmClient([{ text: "the answer" }]);
+  const { ctx, textOut } = makeHarness(client);
+
+  const code = await runOnce("what is the answer?", ctx);
+
+  assert.equal(code, 0);
+  assert.equal(textOut.join(""), "the answer");
+});
+
+test("runOnce returns a non-zero code when the model call fails", async () => {
+  const { ctx } = makeHarness(new ThrowingLlmClient());
+
+  const code = await runOnce("hi", ctx);
+
+  assert.equal(code, 1);
 });

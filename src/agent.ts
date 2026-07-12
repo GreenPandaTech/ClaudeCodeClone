@@ -132,3 +132,18 @@ export async function runAgenticLoop(messages: Message[], ctx: AgentContext): Pr
     messages.push({ role: "user", content: toolResults });
   }
 }
+
+// ─── One-shot (non-interactive) run ───────────────────────────────────────────
+// Runs a single prompt to completion and returns a process exit code: 0 on
+// success, 1 if the model call or a fatal error occurs. Text streams through
+// ctx.io.onText as usual. Used by print mode (`mentor -p "…"`).
+
+export async function runOnce(prompt: string, ctx: AgentContext): Promise<number> {
+  const messages: Message[] = [{ role: "user", content: prompt }];
+  try {
+    await runAgenticLoop(messages, ctx);
+    return 0;
+  } catch {
+    return 1;
+  }
+}
