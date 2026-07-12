@@ -5,6 +5,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import chalk from "chalk";
 import path from "path";
 import { TOOL_DEFINITIONS, executeTool } from "./tools.js";
+import { runAgenticLoop, type AgentContext, type LlmClient, type LlmStream, type Message } from "./agent.js";
 import { VERSION } from "./version.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -52,9 +53,12 @@ if (!process.env.ANTHROPIC_API_KEY) {
 
 const client = new Anthropic();
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-type Message = Anthropic.MessageParam;
+// Adapter over the real streaming API — the loop lives in agent.ts and is driven
+// through this seam (a fake replaces it in the tests).
+const llm: LlmClient = {
+  // The SDK's event union is wider than the loop needs; cast at this one seam.
+  stream: (params) => client.messages.stream(params) as unknown as LlmStream,
+};
 
 // ─── UI helpers ───────────────────────────────────────────────────────────────
 
@@ -163,91 +167,36 @@ function printCost() {
   console.log(chalk.cyan(`  Estimated cost:     $${total.toFixed(4)}\n`));
 }
 
-// ─── Agentic loop ─────────────────────────────────────────────────────────────
+// ─── Agent context factory ────────────────────────────────────────────────────
+// Builds the dependency-injected context that drives the loop in agent.ts.
 
-async function runAgenticLoop(
-  messages: Message[],
-  onText: (text: string) => void,
+function buildAgentContext(
   confirm: (name: string, input: Record<string, unknown>) => Promise<boolean>
-): Promise<void> {
-  while (true) {
-    const stream = await client.messages.stream({
-      model: MODEL,
-      max_tokens: MAX_TOKENS,
-      system: [
-        {
-          type: "text",
-          text: SYSTEM_PROMPT,
-          // Cache the system prompt — it never changes between turns
-          cache_control: { type: "ephemeral" },
-        },
-      ],
-      tools: TOOL_DEFINITIONS as unknown as Anthropic.Tool[],
-      messages,
-    });
-
-    // Stream text to terminal in real time
-    let currentBlockType: string | null = null;
-    for await (const event of stream) {
-      if (event.type === "content_block_start") {
-        currentBlockType = event.content_block.type;
-      }
-      if (
-        event.type === "content_block_delta" &&
-        event.delta.type === "text_delta" &&
-        currentBlockType === "text"
-      ) {
-        onText(event.delta.text);
-      }
-    }
-
-    const finalMsg = await stream.finalMessage();
-    trackUsage(finalMsg.usage);
-
-    // Append assistant response to history
-    messages.push({ role: "assistant", content: finalMsg.content });
-
-    if (finalMsg.stop_reason !== "tool_use") {
-      // Done — no more tool calls
-      process.stdout.write("\n");
-      break;
-    }
-
-    // Execute all tool calls and collect results
-    const toolResults: Anthropic.ToolResultBlockParam[] = [];
-    for (const block of finalMsg.content) {
-      if (block.type !== "tool_use") continue;
-
-      printToolCall(block.name, block.input as Record<string, unknown>);
-
-      if (DESTRUCTIVE_TOOLS.has(block.name) && !AUTO_APPROVE) {
-        const approved = await confirm(block.name, block.input as Record<string, unknown>);
-        if (!approved) {
-          printToolResult({ output: "Skipped — declined by user.", isError: true });
-          toolResults.push({
-            type: "tool_result",
-            tool_use_id: block.id,
-            content: "User declined to run this action.",
-            is_error: true,
-          });
-          continue;
-        }
-      }
-
-      const result = await executeTool(block.name, block.input as Record<string, unknown>);
-      printToolResult(result);
-
-      toolResults.push({
-        type: "tool_result",
-        tool_use_id: block.id,
-        content: result.output,
-        is_error: result.isError,
-      });
-    }
-
-    // Feed results back and loop
-    messages.push({ role: "user", content: toolResults });
-  }
+): AgentContext {
+  return {
+    client: llm,
+    io: {
+      onText: (text) => process.stdout.write(text),
+      onToolCall: (name, input) => printToolCall(name, input),
+      onToolResult: (result) => printToolResult(result),
+      confirm,
+    },
+    execute: executeTool,
+    tools: TOOL_DEFINITIONS as unknown as Anthropic.Tool[],
+    model: MODEL,
+    maxTokens: MAX_TOKENS,
+    system: [
+      {
+        type: "text",
+        text: SYSTEM_PROMPT,
+        // Cache the system prompt — it never changes between turns
+        cache_control: { type: "ephemeral" },
+      },
+    ],
+    autoApprove: AUTO_APPROVE,
+    destructiveTools: DESTRUCTIVE_TOOLS,
+    onUsage: trackUsage,
+  };
 }
 
 // ─── Main REPL ────────────────────────────────────────────────────────────────
@@ -357,11 +306,8 @@ async function main() {
     process.stdout.write(chalk.cyan("\nClaude: "));
 
     try {
-      await runAgenticLoop(
-        messages,
-        (text) => process.stdout.write(text),
-        confirmAction
-      );
+      await runAgenticLoop(messages, buildAgentContext(confirmAction));
+      process.stdout.write("\n");
     } catch (err) {
       if (err instanceof Anthropic.APIError) {
         console.error(chalk.red(`\nAPI Error ${err.status}: ${err.message}`));
