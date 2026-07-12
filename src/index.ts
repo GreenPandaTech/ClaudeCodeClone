@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 import "dotenv/config";
 import readline from "readline";
-import fs from "fs";
 import Anthropic from "@anthropic-ai/sdk";
 import chalk from "chalk";
 import path from "path";
 import { TOOL_DEFINITIONS, executeTool, configureExtraDenylist } from "./tools.js";
 import { formatDiff } from "./diff.js";
 import { classifyCommand } from "./safety.js";
+import { readForPreview } from "./preview.js";
 import { loadConfig, loadProjectContext, type MentorConfig } from "./config.js";
 import { parseArgs } from "./cli-args.js";
 import { saveSession, loadSession, listSessions } from "./session.js";
@@ -136,12 +136,9 @@ function printToolCall(name: string, input: Record<string, unknown>) {
   if (name === "edit_file") {
     printDiffPreview(String(input.old_string ?? ""), String(input.new_string ?? ""));
   } else if (name === "write_file") {
-    let existing = "";
-    try {
-      existing = fs.readFileSync(path.resolve(String(input.file_path)), "utf-8");
-    } catch {
-      /* new file — diff against empty */
-    }
+    // readForPreview applies the sensitive-path denylist, so overwriting a
+    // credential file never streams its contents to the terminal.
+    const existing = readForPreview(String(input.file_path));
     printDiffPreview(existing, String(input.content ?? ""));
   } else if (name === "bash") {
     const risk = classifyCommand(String(input.command ?? ""));
@@ -424,7 +421,7 @@ async function main() {
       return;
     }
 
-    // ── Send to Claude ───────────────────────────────────────────────────────
+    // ── Send to the model ─────────────────────────────────────────────────────
     messages.push({ role: "user", content: input });
 
     // Add cache breakpoint on the last user message to cache the conversation
@@ -440,7 +437,7 @@ async function main() {
       ];
     }
 
-    process.stdout.write(chalk.cyan("\nClaude: "));
+    process.stdout.write(chalk.cyan("\nMentor: "));
 
     try {
       await runAgenticLoop(messages, buildAgentContext(confirmAction));

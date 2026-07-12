@@ -366,6 +366,27 @@ test("a non-retriable error is not retried", async () => {
   assert.equal(client.attempts, 1);
 });
 
+test("the SDK's own connection and timeout errors are retried", async () => {
+  const { APIConnectionError, APIConnectionTimeoutError } = await import("@anthropic-ai/sdk");
+  for (const err of [new APIConnectionError({ message: "Connection error." }), new APIConnectionTimeoutError({})]) {
+    const good = new FakeLlmClient([{ text: "recovered" }]);
+    let n = 0;
+    const client: LlmClient = {
+      stream: (p) => {
+        if (n++ === 0) throw err;
+        return good.stream(p);
+      },
+    };
+    let slept = 0;
+    const { ctx, textOut } = makeHarness(client, {
+      retry: { maxRetries: 3, baseDelayMs: 1, sleep: async () => { slept++; } },
+    });
+    await runAgenticLoop([{ role: "user", content: "go" }], ctx);
+    assert.equal(textOut.join(""), "recovered");
+    assert.equal(slept, 1); // proves it retried rather than throwing
+  }
+});
+
 test("retries are bounded and the error propagates once exhausted", async () => {
   const good = new FakeLlmClient([{ text: "unreached" }]);
   const client = new FlakyLlmClient(99, 503, good); // always fails

@@ -71,6 +71,21 @@ test("isSensitivePath allows an ordinary file", () => {
   assert.equal(isSensitivePath(path.resolve(os.tmpdir(), "notes.txt")), false);
 });
 
+test("isSensitivePath flags credential-file siblings and variants", () => {
+  for (const f of [
+    ".env.development.local",
+    ".env.staging",
+    ".env.test",
+    ".git-credentials",
+    ".npmrc",
+    ".pgpass",
+    ".pypirc",
+    ".netrc",
+  ]) {
+    assert.equal(isSensitivePath(path.resolve(os.tmpdir(), f)), true, f);
+  }
+});
+
 test("configureExtraDenylist extends the denied filenames", () => {
   const target = path.resolve(os.tmpdir(), "company-secrets.json");
   assert.equal(isSensitivePath(target), false);

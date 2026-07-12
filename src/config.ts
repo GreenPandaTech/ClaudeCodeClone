@@ -81,7 +81,13 @@ export function loadConfig(cwd: string, env: Record<string, string | undefined>)
     }
     cfg.maxTokens = n;
   }
-  if (env.AUTO_APPROVE === "1") cfg.autoApprove = true;
+  // Explicitly-set AUTO_APPROVE wins in BOTH directions, so a user can re-enable
+  // the confirmation gate over a config-file autoApprove:true. Unset/empty keeps
+  // the file value.
+  if (env.AUTO_APPROVE != null && env.AUTO_APPROVE !== "") {
+    const v = env.AUTO_APPROVE.trim().toLowerCase();
+    cfg.autoApprove = v === "1" || v === "true" || v === "yes";
+  }
 
   return cfg;
 }

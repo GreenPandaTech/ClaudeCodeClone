@@ -79,9 +79,10 @@ function isRetriable(err: unknown): boolean {
     const status = (err as { status: unknown }).status;
     if (typeof status === "number" && RETRIABLE_STATUS.has(status)) return true;
   }
-  // Network-level failures (no status) and explicit overload messages.
+  // Network-level failures (no status) and explicit overload messages. The
+  // Anthropic SDK wraps these as "Connection error." / "Request timed out.".
   const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
-  return /overloaded|econnreset|etimedout|network|socket hang up/.test(msg);
+  return /overloaded|econnreset|etimedout|timed out|connection error|network|socket hang up/.test(msg);
 }
 
 function defaultSleep(ms: number): Promise<void> {

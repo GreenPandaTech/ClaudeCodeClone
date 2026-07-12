@@ -13,13 +13,15 @@ export interface CommandRisk {
 
 const RANK: Record<RiskLevel, number> = { normal: 0, caution: 1, danger: 2 };
 
-/** Does an `rm` in the command carry both a recursive and a force flag? */
+/** Does an `rm` in the command carry both a recursive and a force flag?
+ *  Scans every flag token in the rm command segment, not just the first run,
+ *  since GNU rm accepts flags before or after the operand (e.g. `rm / -rf`). */
 function isRecursiveForceRm(cmd: string): boolean {
-  const m = cmd.match(/\brm\b((?:\s+-{1,2}[a-zA-Z-]+)+)/);
+  const m = cmd.match(/\brm\b([^\n;|&]*)/);
   if (!m) return false;
-  const flags = m[1];
-  const recursive = /(^|\s)-[a-zA-Z]*r/i.test(flags) || /--recursive/.test(flags);
-  const force = /(^|\s)-[a-zA-Z]*f/i.test(flags) || /--force/.test(flags);
+  const seg = m[1];
+  const recursive = /(^|\s)-[a-zA-Z]*r/i.test(seg) || /--recursive\b/.test(seg);
+  const force = /(^|\s)-[a-zA-Z]*f/i.test(seg) || /--force\b/.test(seg);
   return recursive && force;
 }
 

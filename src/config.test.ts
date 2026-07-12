@@ -60,6 +60,16 @@ test("loadConfig fails loud on an invalid MAX_TOKENS env", () => {
   assert.throws(() => loadConfig(tmpDir(), { MAX_TOKENS: "not-a-number" }), /MAX_TOKENS/);
 });
 
+test("AUTO_APPROVE env can both enable and DISABLE a config-file value", () => {
+  const dir = tmpDir();
+  fs.writeFileSync(path.join(dir, ".mentorrc.json"), '{"autoApprove":true}');
+  // env has highest precedence in BOTH directions (safety gate can be restored)
+  assert.equal(loadConfig(dir, { AUTO_APPROVE: "0" }).autoApprove, false);
+  assert.equal(loadConfig(dir, { AUTO_APPROVE: "false" }).autoApprove, false);
+  assert.equal(loadConfig(dir, {}).autoApprove, true); // unset keeps the file value
+  assert.equal(loadConfig(dir, { AUTO_APPROVE: "1" }).autoApprove, true);
+});
+
 test("loadConfig fails loud on a malformed config file", () => {
   const dir = tmpDir();
   fs.writeFileSync(path.join(dir, ".mentorrc.json"), "{ broken");
