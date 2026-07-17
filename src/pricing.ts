@@ -39,7 +39,31 @@ export function priceFor(model: string): { pricing: ModelPricing; known: boolean
   return { pricing: FALLBACK_PRICING, known: false };
 }
 
+const USAGE_FIELDS: (keyof ModelUsage)[] = [
+  "inputTokens",
+  "outputTokens",
+  "cacheReadTokens",
+  "cacheWriteTokens",
+];
+
+/** Fail loud on malformed usage data instead of letting it silently compute
+ *  NaN/Infinity that then propagates into cost totals and reports unnoticed. */
+function assertValidUsage(usage: ModelUsage): void {
+  if (usage === null || typeof usage !== "object") {
+    throw new Error(`Invalid usage data: expected an object, got ${JSON.stringify(usage)}`);
+  }
+  for (const field of USAGE_FIELDS) {
+    const value = usage[field];
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      throw new Error(
+        `Invalid usage data: "${field}" must be a finite number, got ${JSON.stringify(value)}`
+      );
+    }
+  }
+}
+
 export function costOf(usage: ModelUsage, pricing: ModelPricing): number {
+  assertValidUsage(usage);
   return (
     (usage.inputTokens * pricing.inputPerM +
       usage.outputTokens * pricing.outputPerM +
@@ -68,7 +92,12 @@ export function estimateCost(usageByModel: Record<string, ModelUsage>): CostEsti
   let anyUnknown = false;
   for (const model of Object.keys(usageByModel).sort()) {
     const { pricing, known } = priceFor(model);
-    const cost = costOf(usageByModel[model], pricing);
+    let cost: number;
+    try {
+      cost = costOf(usageByModel[model], pricing);
+    } catch (err) {
+      throw new Error(`estimateCost: invalid usage for model "${model}": ${(err as Error).message}`, { cause: err });
+    }
     if (!known) anyUnknown = true;
     total += cost;
     lines.push({ model, usage: usageByModel[model], cost, known });

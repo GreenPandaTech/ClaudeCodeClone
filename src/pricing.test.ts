@@ -57,3 +57,39 @@ test("estimateCost is deterministic", () => {
   const usage = { "claude-sonnet-4-6": M({ inputTokens: 123, outputTokens: 45 }) };
   assert.deepEqual(estimateCost(usage), estimateCost(usage));
 });
+
+// ─── malformed usage fails loud instead of silently returning NaN ─────────────
+
+test("costOf throws on a missing numeric field instead of returning NaN", () => {
+  const sonnet = priceFor("claude-sonnet-4-6").pricing;
+  const malformed = { inputTokens: undefined, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } as unknown as ModelUsage;
+  assert.throws(() => costOf(malformed, sonnet), /"inputTokens" must be a finite number/);
+});
+
+test("costOf throws on a non-numeric field instead of returning NaN", () => {
+  const sonnet = priceFor("claude-sonnet-4-6").pricing;
+  const malformed = { inputTokens: 100, outputTokens: "a lot", cacheReadTokens: 0, cacheWriteTokens: 0 } as unknown as ModelUsage;
+  assert.throws(() => costOf(malformed, sonnet), /"outputTokens" must be a finite number/);
+});
+
+test("costOf throws on NaN/Infinity fields instead of propagating them", () => {
+  const sonnet = priceFor("claude-sonnet-4-6").pricing;
+  assert.throws(() => costOf(M({ inputTokens: NaN }), sonnet), /must be a finite number/);
+  assert.throws(() => costOf(M({ outputTokens: Infinity }), sonnet), /must be a finite number/);
+});
+
+test("estimateCost throws (naming the offending model) instead of silently returning NaN", () => {
+  const malformed = {
+    "claude-sonnet-4-6": M({ inputTokens: 10 }),
+    "claude-opus-4-8": { inputTokens: 1, outputTokens: null, cacheReadTokens: 0, cacheWriteTokens: 0 } as unknown as ModelUsage,
+  };
+  assert.throws(
+    () => estimateCost(malformed),
+    /estimateCost: invalid usage for model "claude-opus-4-8".*"outputTokens" must be a finite number/s
+  );
+});
+
+test("estimateCost never returns a NaN total for malformed usage (fails loud instead)", () => {
+  const malformed = { "claude-sonnet-4-6": {} as unknown as ModelUsage };
+  assert.throws(() => estimateCost(malformed));
+});
