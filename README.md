@@ -121,7 +121,7 @@ The tool layer has several guardrails — the reason this is more than a thin AP
 - **Destructive-action confirmation.** `bash`, `write_file`, and `edit_file` require explicit approval before running unless auto-approve is set.
 - **Diff-before-write.** File edits show a real unified diff of the change before you approve it.
 - **Dangerous-command classifier.** Risky `bash` commands are flagged (caution/danger) with the reason before you approve them.
-- **Sensitive-path denylist.** `read_file`, `write_file`, `edit_file`, and the `grep` walker refuse to touch credential files by name (`.env`, `id_rsa`, `credentials`), by extension (`.pem`, `.key`, `.p12`, `.pfx`), or by directory (`~/.ssh`, `~/.aws`, `~/.gnupg`, …). The list can be extended via `extraDenylist` but never shrunk.
+- **Sensitive-path denylist.** `read_file`, `write_file`, `edit_file`, and the `grep` walker refuse to touch credential files by name (`.env`, `id_rsa`, `credentials`), by extension (`.pem`, `.key`, `.p12`, `.pfx`), by cloud credential naming pattern (`credentials.json` and its `*-credentials.json` variants, `service-account.json`/`service_account.json`, `gcloud-service-account*.json`, `firebase-adminsdk*.json`), or by directory (`~/.ssh`, `~/.aws`, `~/.gnupg`, …). The list can be extended via `extraDenylist` but never shrunk.
 - **ReDoS guard.** `grep` rejects overly long patterns and catastrophic-backtracking shapes, and the file walk has a 10-second budget and a 1000-match cap.
 - **Injection-safe `edit_file`.** An edit only applies when its `old_string` matches exactly once, so an ambiguous or stale target fails loudly instead of editing the wrong place.
 

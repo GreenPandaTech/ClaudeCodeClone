@@ -26,6 +26,9 @@ const DENYLIST_PREFIXES: string[] = [
 ];
 const DENYLIST_NAMES = new Set([
   "credentials",
+  "credentials.json",
+  "service-account.json",
+  "service_account.json",
   "id_rsa",
   "id_ed25519",
   "id_dsa",
@@ -65,6 +68,15 @@ export function isSensitivePath(resolved: string): boolean {
     // Every dotenv variant (.env, .env.local, .env.production, .env.*.local, …).
     if (base === ".env" || base.startsWith(".env.")) return true;
     if (base.endsWith(".pem") || base.endsWith(".key") || base.endsWith(".p12") || base.endsWith(".pfx")) return true;
+    // Cloud credential files and their common real-world naming variants: any
+    // "*credentials.json" bundle (gcp-credentials.json, oauth_credentials.json, …),
+    // any GCP/Firebase service-account key (service-account.json,
+    // gcloud-service-account-prod.json, my-serviceAccountKey.json — already
+    // lower-cased above so the separator-optional match also covers camelCase),
+    // and Firebase Admin SDK keys (firebase-adminsdk-<id>-<hash>.json).
+    if (/credentials\.json$/.test(base)) return true;
+    if (/service[-_]?account/.test(base) && base.endsWith(".json")) return true;
+    if (base.includes("firebase-adminsdk") && base.endsWith(".json")) return true;
     if (DENYLIST_PREFIXES.some(p => lower === p.toLowerCase() || lower.startsWith(p.toLowerCase() + path.sep))) return true;
   }
   return false;

@@ -86,6 +86,22 @@ test("isSensitivePath flags credential-file siblings and variants", () => {
   }
 });
 
+test("isSensitivePath flags cloud credential files and their common naming variants", () => {
+  for (const f of [
+    "credentials.json",
+    "service-account.json",
+    "service_account.json",
+    "gcp-credentials.json",
+    "oauth_credentials.json",
+    "gcloud-service-account-prod.json",
+    "firebase-adminsdk-abc123-def456.json",
+    "my-serviceAccountKey.json",
+    "SERVICE-ACCOUNT.JSON", // case-insensitive, like the built-in denylist
+  ]) {
+    assert.equal(isSensitivePath(path.resolve(os.tmpdir(), f)), true, f);
+  }
+});
+
 test("configureExtraDenylist extends the denied filenames", () => {
   const target = path.resolve(os.tmpdir(), "company-secrets.json");
   assert.equal(isSensitivePath(target), false);
