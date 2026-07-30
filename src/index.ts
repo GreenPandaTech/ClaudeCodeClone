@@ -11,6 +11,7 @@ import { readForPreview } from "./preview.js";
 import { loadConfig, loadProjectContext, type MentorConfig } from "./config.js";
 import { parseArgs } from "./cli-args.js";
 import { saveSession, loadSession, listSessions } from "./session.js";
+import { withCheckpoints, viewChanges, undoLastChange, undoLastTurn } from "./checkpoints.js";
 import { estimateCost, type ModelUsage } from "./pricing.js";
 import { runAgenticLoop, runOnce, type AgentContext, type LlmClient, type LlmStream, type Message } from "./agent.js";
 import { VERSION } from "./version.js";
@@ -90,6 +91,10 @@ function loadConfigOrExit(): MentorConfig {
 const config = loadConfigOrExit();
 configureExtraDenylist(config.extraDenylist);
 
+// Checkpoint every approved write_file / edit_file so /undo and /changes work.
+// The wrapper sits on the execute seam; all the logic lives in checkpoints.ts.
+const checkpointer = withCheckpoints(executeTool, { keepTurns: config.checkpointTurns });
+
 // Fold project memory (MENTOR.md / AGENTS.md) into the cached system prompt.
 const projectContext = loadProjectContext(process.cwd());
 const SYSTEM_TEXT = projectContext
@@ -124,6 +129,8 @@ function printHelp() {
   console.log(chalk.cyan("  /save [name]  ") + "Save this conversation to .mentor/sessions");
   console.log(chalk.cyan("  /resume [name]") + " Load a saved conversation");
   console.log(chalk.cyan("  /sessions     ") + "List saved sessions");
+  console.log(chalk.cyan("  /changes      ") + "List files Mentor changed this session, with diffs");
+  console.log(chalk.cyan("  /undo [turn]  ") + "Revert the last file change (or the whole last turn)");
   console.log(chalk.cyan("  /exit         ") + "Exit the program\n");
 }
 
@@ -253,7 +260,7 @@ function buildAgentContext(
       onToolResult: (result) => printToolResult(result),
       confirm,
     },
-    execute: executeTool,
+    execute: checkpointer.execute,
     tools: TOOL_DEFINITIONS as unknown as Anthropic.Tool[],
     model: config.model,
     maxTokens: config.maxTokens,
@@ -407,6 +414,54 @@ async function main() {
           break;
         }
 
+        case "changes": {
+          try {
+            const mine = new Set(checkpointer.sessionTurns());
+            const turns = viewChanges(process.cwd()).filter((t) => mine.has(t.turn));
+            if (turns.length === 0) {
+              console.log(chalk.dim("No files changed this session."));
+              break;
+            }
+            for (const t of turns) {
+              console.log(chalk.bold(`\nTurn ${t.turn}:`));
+              for (const ch of t.changes) {
+                const flags =
+                  (ch.existedBefore ? "" : chalk.dim(" (new file)")) +
+                  (ch.intact ? "" : chalk.yellow(" (edited outside Mentor since)"));
+                console.log(chalk.cyan(`  ${ch.file}`) + flags);
+                printDiffPreview(ch.before, ch.current);
+              }
+            }
+            console.log("");
+          } catch (err) {
+            console.log(chalk.red(String(err instanceof Error ? err.message : err)));
+          }
+          break;
+        }
+
+        case "undo": {
+          const wholeTurn = args.join(" ").trim().toLowerCase() === "turn";
+          try {
+            const res = wholeTurn ? undoLastTurn(process.cwd()) : undoLastChange(process.cwd());
+            if (!res) {
+              console.log(chalk.dim("Nothing to undo."));
+              break;
+            }
+            for (const u of res.undone) {
+              console.log(chalk.green(`  ✓ ${u.action === "deleted" ? "removed" : "restored"} ${u.file}`));
+            }
+            for (const r of res.refused) {
+              console.log(chalk.red(`  ✗ refused: ${r.file}`));
+              console.log(chalk.red(`    ${r.reason}`));
+              console.log(chalk.dim("    diff (current on disk -> what /undo would restore):"));
+              printDiffPreview(r.current, r.before);
+            }
+          } catch (err) {
+            console.log(chalk.red(String(err instanceof Error ? err.message : err)));
+          }
+          break;
+        }
+
         case "exit":
         case "quit":
           printCost();
@@ -440,6 +495,7 @@ async function main() {
     process.stdout.write(chalk.cyan("\nMentor: "));
 
     try {
+      checkpointer.beginTurn(); // group this prompt's file changes for /undo turn
       await runAgenticLoop(messages, buildAgentContext(confirmAction));
       process.stdout.write("\n");
     } catch (err) {
