@@ -58,6 +58,34 @@ function psCommandSegment(cmd: string, names: string): string | null {
   return m ? m[1] : null;
 }
 
+// ─── Shell-wrapper unwrapping ────────────────────────────────────────────────
+// The threats above are routinely spelled through a wrapper — `cmd /c del /s
+// /q C:\` or an unquoted `powershell -Command Remove-Item …` — where the real
+// command sits in ARGUMENT position and a command-position anchor alone would
+// never see it. classifyCommand strips wrappers found at a command position
+// (keeping the separator, so the payload becomes a command position itself)
+// and classifies every intermediate string, keeping the worst rating. That
+// makes unwrapping strictly additive: it can surface a threat, never hide one.
+
+/** cmd | cmd.exe invoked as a command, then any /x flags, ending in /c or /k
+ *  (run-and-exit / run-and-stay), then an optionally quoted payload. */
+const CMD_WRAPPER = /(^|[;&|(])(\s*)cmd(?:\.exe)?\s+(?:\/[a-z]+\s+)*\/[ck]\s+"?/i;
+
+/** powershell | pwsh invoked as a command, then any -Flag [value] pairs,
+ *  ending in -Command or -c, then an UNQUOTED payload. (Quoted payloads are
+ *  already covered: psCommandSegment treats quotes as separators.) */
+const PS_WRAPPER =
+  /(^|[;&|(])(\s*)(?:powershell|pwsh)(?:\.exe)?\s+(?:-\w+(?:\s+[\w.]+)?\s+)*?-c(?:ommand)?\s+"?/i;
+
+/** The command with one wrapper prefix removed (its separator kept), or null
+ *  when no wrapper is found at a command position. */
+function stripOneWrapper(cmd: string): string | null {
+  for (const re of [CMD_WRAPPER, PS_WRAPPER]) {
+    if (re.test(cmd)) return cmd.replace(re, "$1$2");
+  }
+  return null;
+}
+
 /** del/erase/rd/rmdir carrying both /s (recursive) and /q (quiet), any order. */
 function isCmdRecursiveDelete(cmd: string): boolean {
   const seg = commandSegment(cmd, "del|erase|rd|rmdir");
@@ -233,11 +261,21 @@ const RULES: Rule[] = [
 ];
 
 export function classifyCommand(command: string): CommandRisk {
-  const cmd = command.trim();
+  // Unwrap shell wrappers stage by stage (bounded — each strip shortens the
+  // string; the cap only guards against surprises). Every stage is classified
+  // and the worst rating wins, so unwrapping never downgrades a command.
+  const stages: string[] = [command.trim()];
+  for (let i = 0; i < 8; i++) {
+    const next = stripOneWrapper(stages[stages.length - 1]);
+    if (next === null) break;
+    stages.push(next.trim());
+  }
   let best: CommandRisk = { level: "normal", reason: "" };
-  for (const rule of RULES) {
-    if (rule.test(cmd) && RANK[rule.level] > RANK[best.level]) {
-      best = { level: rule.level, reason: rule.reason };
+  for (const cmd of stages) {
+    for (const rule of RULES) {
+      if (rule.test(cmd) && RANK[rule.level] > RANK[best.level]) {
+        best = { level: rule.level, reason: rule.reason };
+      }
     }
   }
   return best;
