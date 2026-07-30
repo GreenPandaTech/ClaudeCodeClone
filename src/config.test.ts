@@ -39,6 +39,22 @@ test("parseConfigFile reads checkpointTurns and validates it strictly", () => {
   assert.throws(() => parseConfigFile('{"checkpointTurns":2.5}'), /checkpointTurns/);
 });
 
+test("parseConfigFile reads autoCompactThreshold and validates it strictly", () => {
+  assert.deepEqual(parseConfigFile('{"autoCompactThreshold":0.5}'), { autoCompactThreshold: 0.5 });
+  assert.deepEqual(parseConfigFile('{"autoCompactThreshold":0}'), { autoCompactThreshold: 0 }); // 0 disables
+  assert.throws(() => parseConfigFile('{"autoCompactThreshold":"most"}'), /autoCompactThreshold/);
+  assert.throws(() => parseConfigFile('{"autoCompactThreshold":1}'), /autoCompactThreshold/);
+  assert.throws(() => parseConfigFile('{"autoCompactThreshold":1.5}'), /autoCompactThreshold/);
+  assert.throws(() => parseConfigFile('{"autoCompactThreshold":-0.1}'), /autoCompactThreshold/);
+});
+
+test("autoCompactThreshold defaults to a sensible fraction and loads from the file", () => {
+  assert.ok(DEFAULT_CONFIG.autoCompactThreshold > 0 && DEFAULT_CONFIG.autoCompactThreshold < 1);
+  const dir = tmpDir();
+  fs.writeFileSync(path.join(dir, ".mentorrc.json"), '{"autoCompactThreshold":0.5}');
+  assert.equal(loadConfig(dir, {}).autoCompactThreshold, 0.5);
+});
+
 test("checkpointTurns defaults to a sensible positive integer", () => {
   assert.ok(Number.isInteger(DEFAULT_CONFIG.checkpointTurns) && DEFAULT_CONFIG.checkpointTurns > 0);
   const dir = tmpDir();

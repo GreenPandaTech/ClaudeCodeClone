@@ -13,6 +13,8 @@ import { parseArgs } from "./cli-args.js";
 import { saveSession, loadSession, listSessions } from "./session.js";
 import { withCheckpoints, viewChanges, undoLastChange, undoLastTurn } from "./checkpoints.js";
 import { estimateCost, type ModelUsage } from "./pricing.js";
+import { analyzeContext, renderContextMeter, type ContextBreakdown } from "./context.js";
+import { compactHistory } from "./compact.js";
 import { runAgenticLoop, runOnce, type AgentContext, type LlmClient, type LlmStream, type Message } from "./agent.js";
 import { VERSION } from "./version.js";
 
@@ -124,6 +126,8 @@ function printHelp() {
   console.log(chalk.cyan("  /help         ") + "Show this help");
   console.log(chalk.cyan("  /clear        ") + "Clear conversation history");
   console.log(chalk.cyan("  /cost         ") + "Show token usage and estimated cost per model");
+  console.log(chalk.cyan("  /context      ") + "Show a context-usage meter and breakdown");
+  console.log(chalk.cyan("  /compact      ") + "Summarize the conversation to free context");
   console.log(chalk.cyan("  /cwd <path>   ") + "Change the working directory");
   console.log(chalk.cyan("  /model [id]   ") + "Show or switch the model for later turns");
   console.log(chalk.cyan("  /save [name]  ") + "Save this conversation to .mentor/sessions");
@@ -208,6 +212,11 @@ function printToolResult(result: { output: string; isError?: boolean }) {
 
 const usageByModel: Record<string, ModelUsage> = {};
 
+// The API-reported size of the most recent call (prompt + output tokens): the
+// authoritative context measure behind /context and auto-compact. Reset to null
+// whenever the history is replaced (/clear, /resume, /compact, auto-compact).
+let lastPromptTokens: number | null = null;
+
 function trackUsage(model: string, usage: Anthropic.Usage) {
   const u = (usageByModel[model] ??= {
     inputTokens: 0,
@@ -219,6 +228,14 @@ function trackUsage(model: string, usage: Anthropic.Usage) {
   u.outputTokens += usage.output_tokens;
   u.cacheReadTokens += usage.cache_read_input_tokens ?? 0;
   u.cacheWriteTokens += usage.cache_creation_input_tokens ?? 0;
+
+  // input + cache read + cache write is the full prompt actually processed;
+  // the output tokens become part of the next request's prompt.
+  lastPromptTokens =
+    usage.input_tokens +
+    (usage.cache_read_input_tokens ?? 0) +
+    (usage.cache_creation_input_tokens ?? 0) +
+    usage.output_tokens;
 }
 
 function printCost() {
@@ -244,6 +261,111 @@ function printCost() {
     console.log(chalk.dim("  (est.) = model not in the price table; Sonnet-class rates assumed"));
   }
   console.log("");
+}
+
+// ─── Context meter + compaction (/context, /compact, auto-compact) ────────────
+
+function currentBreakdown(messages: Message[]): ContextBreakdown {
+  return analyzeContext({
+    model: config.model,
+    maxTokens: config.maxTokens,
+    systemText: SYSTEM_TEXT,
+    tools: TOOL_DEFINITIONS,
+    messages,
+    measuredTokens: lastPromptTokens,
+    autoCompactThreshold: config.autoCompactThreshold,
+  });
+}
+
+function printContext(b: ContextBreakdown) {
+  console.log(chalk.bold("\nContext usage:"));
+  console.log(
+    chalk.dim(
+      `  Model ${b.model} — context window ${b.contextWindow.toLocaleString()} tokens` +
+        (b.windowKnown ? "" : " (unknown model; conservative default)"),
+    ),
+  );
+  console.log(
+    chalk.dim(
+      `  Usable for input: ${b.usableWindow.toLocaleString()} tokens` +
+        ` (window minus the ${config.maxTokens.toLocaleString()}-token output reservation)`,
+    ),
+  );
+  console.log(
+    "  " +
+      renderContextMeter(b.usedFraction) +
+      chalk.dim(`  ${b.effectiveTokens.toLocaleString()} / ${b.usableWindow.toLocaleString()} tokens`),
+  );
+  if (b.measuredTokens != null) {
+    console.log(chalk.dim(`  Measured (last API call): ${b.measuredTokens.toLocaleString()} tokens`));
+  } else {
+    console.log(chalk.dim("  No API call yet this session — figures below are estimates."));
+  }
+  console.log(chalk.dim("  Estimated composition (~4 chars/token heuristic):"));
+  console.log(chalk.dim(`    system prompt     ~${b.systemTokens.toLocaleString()}`));
+  console.log(chalk.dim(`    tool definitions  ~${b.toolTokens.toLocaleString()}`));
+  console.log(
+    chalk.dim(
+      `    messages          ~${b.messageTokens.toLocaleString()}` +
+        ` (${b.messageCount} message${b.messageCount === 1 ? "" : "s"})`,
+    ),
+  );
+  if (b.autoCompactAt != null) {
+    const note = b.willAutoCompact ? chalk.yellow("  — will auto-compact after the next turn") : "";
+    console.log(
+      chalk.dim(
+        `  Auto-compact at ${Math.round(b.autoCompactThreshold * 100)}% of usable` +
+          ` (${b.autoCompactAt.toLocaleString()} tokens)`,
+      ) + note,
+    );
+  } else {
+    console.log(chalk.dim("  Auto-compact: disabled (autoCompactThreshold 0)"));
+  }
+  console.log("");
+}
+
+// Run /compact (or the auto-compact path): summarize through the same DI seam
+// the loop uses and replace the history in place. Failure leaves it untouched.
+async function runCompact(messages: Message[], auto: boolean): Promise<void> {
+  if (messages.length === 0) {
+    console.log(chalk.dim("Nothing to compact."));
+    return;
+  }
+  process.stdout.write(chalk.dim(auto ? "  Auto-compacting conversation…\n" : "Compacting conversation…\n"));
+  try {
+    const res = await compactHistory(messages, {
+      client: llm,
+      model: config.model,
+      maxTokens: config.maxTokens,
+    });
+    if (!res) {
+      console.log(chalk.dim("Nothing to compact."));
+      return;
+    }
+    lastPromptTokens = null; // the old measurement described the old history
+    console.log(
+      chalk.green(`  ✓ compacted ${res.messagesBefore} message${res.messagesBefore === 1 ? "" : "s"} → 1`) +
+        chalk.dim(
+          ` (~${res.estimatedTokensBefore.toLocaleString()} → ~${res.estimatedTokensAfter.toLocaleString()}` +
+            " estimated message tokens)",
+        ),
+    );
+  } catch (err) {
+    console.log(chalk.red("  ✗ compact failed: " + (err instanceof Error ? err.message : String(err))));
+    console.log(chalk.dim("  History unchanged" + (auto ? "; /compact to retry." : ".")));
+  }
+}
+
+async function maybeAutoCompact(messages: Message[]): Promise<void> {
+  const b = currentBreakdown(messages);
+  if (!b.willAutoCompact) return;
+  console.log(
+    chalk.yellow(
+      `\n  ⚠ context is at ${Math.round(b.usedFraction * 100)}% of the usable window` +
+        ` (threshold ${Math.round(b.autoCompactThreshold * 100)}%)`,
+    ),
+  );
+  await runCompact(messages, true);
 }
 
 // ─── Agent context factory ────────────────────────────────────────────────────
@@ -348,11 +470,24 @@ async function main() {
 
         case "clear":
           messages.length = 0;
+          lastPromptTokens = null; // the old measurement described the old history
           console.log(chalk.dim("Conversation cleared."));
           break;
 
         case "cost":
           printCost();
+          break;
+
+        case "context":
+          try {
+            printContext(currentBreakdown(messages));
+          } catch (err) {
+            console.log(chalk.red(String(err instanceof Error ? err.message : err)));
+          }
+          break;
+
+        case "compact":
+          await runCompact(messages, false);
           break;
 
         case "cwd": {
@@ -390,6 +525,7 @@ async function main() {
             const data = loadSession(process.cwd(), name);
             messages.length = 0;
             messages.push(...data.messages);
+            lastPromptTokens = null; // measurement belonged to the replaced history
             console.log(chalk.dim(`Resumed session "${name}" (${messages.length} messages).`));
           } catch (err) {
             console.log(chalk.red(String(err instanceof Error ? err.message : err)));
@@ -507,6 +643,8 @@ async function main() {
       checkpointer.beginTurn(); // group this prompt's file changes for /undo turn
       await runAgenticLoop(messages, buildAgentContext(confirmAction));
       process.stdout.write("\n");
+      // Auto-compact once the measured context crosses the configured threshold.
+      await maybeAutoCompact(messages);
     } catch (err) {
       if (err instanceof Anthropic.APIError) {
         console.error(chalk.red(`\nAPI Error ${err.status}: ${err.message}`));

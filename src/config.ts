@@ -12,6 +12,8 @@ export interface MentorConfig {
   extraDenylist: string[];
   /** How many turns of file checkpoints to keep for /undo and /changes. */
   checkpointTurns: number;
+  /** Auto-compact when context reaches this fraction of the usable window (0 disables). */
+  autoCompactThreshold: number;
 }
 
 export const DEFAULT_MODEL = "claude-sonnet-4-6";
@@ -22,6 +24,7 @@ export const DEFAULT_CONFIG: MentorConfig = {
   autoApprove: false,
   extraDenylist: [],
   checkpointTurns: 20,
+  autoCompactThreshold: 0.8,
 };
 
 // Cap on project-context size injected into the system prompt.
@@ -66,6 +69,19 @@ export function parseConfigFile(text: string): Partial<MentorConfig> {
       throw new Error("Invalid config: checkpointTurns must be a positive integer");
     }
     out.checkpointTurns = obj.checkpointTurns;
+  }
+  if ("autoCompactThreshold" in obj) {
+    if (
+      typeof obj.autoCompactThreshold !== "number" ||
+      !Number.isFinite(obj.autoCompactThreshold) ||
+      obj.autoCompactThreshold < 0 ||
+      obj.autoCompactThreshold >= 1
+    ) {
+      throw new Error(
+        "Invalid config: autoCompactThreshold must be a number >= 0 and < 1 (0 disables auto-compact)"
+      );
+    }
+    out.autoCompactThreshold = obj.autoCompactThreshold;
   }
   return out;
 }
