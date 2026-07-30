@@ -1,12 +1,17 @@
 # Mentor - a terminal AI coding assistant on the Anthropic API
 
 [![CI](https://github.com/GreenPandaTech/Mentor/actions/workflows/ci.yml/badge.svg)](https://github.com/GreenPandaTech/Mentor/actions/workflows/ci.yml)
-![version](https://img.shields.io/badge/version-v2.0.0-blue)
+![version](https://img.shields.io/badge/version-v2.1.0-blue)
 ![node](https://img.shields.io/badge/node-22%2B-green)
 
 Mentor is a local, terminal-based AI coding assistant in the style of Claude Code. It runs an agentic loop over the Anthropic Messages API: you type a request, Claude plans and calls tools (read/write/edit files, run shell commands, search the codebase), and Mentor executes those calls in your working directory and feeds the results back until the task is done. It bills against your own pay-as-you-go API credits — no subscription.
 
 The non-obvious part is how small and how *testable* the loop is: a single streaming call with a cached system prompt, seven tools, and a confirmation gate on anything destructive — with the whole agentic core behind a dependency-injected seam so it is unit-tested without ever hitting the network.
+
+## What's new in v2.1.0
+
+- **Turn-level checkpoints, `/undo` and `/changes`.** Before every approved `write_file` / `edit_file` is applied, Mentor snapshots the file's full prior content (or a did-not-exist marker) plus a hash of the new content, grouped per user turn, under `.mentor/checkpoints/` (self-ignoring, like sessions). `/changes` lists every file Mentor changed this session, grouped by turn, with colored diffs. `/undo` reverts the most recent change; `/undo turn` reverts the whole last turn. If a file's current content no longer matches what Mentor left there (you edited it since), the revert is **refused** and a diff is shown instead of clobbering your edits. Old checkpoints are pruned — the horizon is `checkpointTurns` in `.mentorrc.json` (default 20 turns).
+- **Windows-aware dangerous-command classifier.** On win32 the `bash` tool runs cmd.exe, so the classifier now also rates cmd.exe / PowerShell threats: `del`/`rd` `/s /q` (danger on a drive root or the Windows directory, caution locally), `format <drive>`, `diskpart`, `reg delete HKLM|HKCU`, `Remove-Item -Recurse -Force`, `vssadmin delete shadows`, `taskkill /f` on system-critical processes, and download-and-execute (`iwr … | iex`, `Invoke-Expression (New-Object Net.WebClient)…`, downloads piped into cmd/powershell). All POSIX rules are unchanged. Keywords are matched at command position only, so a benign string that merely contains one (a filename, an echoed message) does not trip a rule; ambiguous shapes rate caution, not danger.
 
 ## What's new in v2.0.0
 
@@ -83,6 +88,8 @@ In one-shot mode the assistant's text goes to stdout and tool activity to stderr
 | `/save [name]` | Save this conversation to `.mentor/sessions` |
 | `/resume [name]` | Load a saved conversation |
 | `/sessions` | List saved sessions |
+| `/changes` | List files Mentor changed this session, grouped by turn, with diffs |
+| `/undo` | Revert the most recent file change (`/undo turn` reverts the whole last turn) |
 | `/exit` | Exit (`/quit` also works) |
 
 ### Configuration & project memory
@@ -94,7 +101,8 @@ Drop a `.mentorrc.json` in your project root to set defaults:
   "model": "claude-sonnet-4-6",
   "maxTokens": 64000,
   "autoApprove": false,
-  "extraDenylist": ["secrets.json", "internal-notes.md"]
+  "extraDenylist": ["secrets.json", "internal-notes.md"],
+  "checkpointTurns": 20
 }
 ```
 
@@ -120,7 +128,8 @@ The tool layer has several guardrails — the reason this is more than a thin AP
 
 - **Destructive-action confirmation.** `bash`, `write_file`, and `edit_file` require explicit approval before running unless auto-approve is set.
 - **Diff-before-write.** File edits show a real unified diff of the change before you approve it.
-- **Dangerous-command classifier.** Risky `bash` commands are flagged (caution/danger) with the reason before you approve them.
+- **Dangerous-command classifier.** Risky `bash` commands are flagged (caution/danger) with the reason before you approve them — both POSIX threats (`rm -rf /`, `curl | sh`, `dd`, fork bombs, …) and, since the bash tool runs cmd.exe on Windows, cmd.exe/PowerShell threats (`del /s /q`, `format`, `diskpart`, `reg delete HKLM|HKCU`, `Remove-Item -Recurse -Force`, `vssadmin delete shadows`, critical-process `taskkill /f`, `iwr | iex`).
+- **Turn-level checkpoints and safe `/undo`.** Every approved file write/edit is checkpointed (pre-image + post-image hash) before it applies, and `/undo` only ever restores a file whose current content still matches what Mentor left there — a file you edited since is refused with a diff, never clobbered.
 - **Sensitive-path denylist.** `read_file`, `write_file`, `edit_file`, and the `grep` walker refuse to touch credential files by name (`.env`, `id_rsa`, `credentials`), by extension (`.pem`, `.key`, `.p12`, `.pfx`), by cloud credential naming pattern (`credentials.json` and its `*-credentials.json` variants, `service-account.json`/`service_account.json`, `gcloud-service-account*.json`, `firebase-adminsdk*.json`), or by directory (`~/.ssh`, `~/.aws`, `~/.gnupg`, …). The list can be extended via `extraDenylist` but never shrunk.
 - **ReDoS guard.** `grep` rejects overly long patterns and catastrophic-backtracking shapes, and the file walk has a 10-second budget and a 1000-match cap.
 - **Injection-safe `edit_file`.** An edit only applies when its `old_string` matches exactly once, so an ambiguous or stale target fails loudly instead of editing the wrong place.
@@ -136,7 +145,10 @@ Uses `claude-sonnet-4-6` by default (override with `MODEL`, `.mentorrc.json`, `-
 - Single-user terminal REPL plus a one-shot mode; sessions persist locally via `/save` but there is no server or multi-user support.
 - `bash` has a fixed 30-second timeout; long-running commands are killed.
 - The denylist, ReDoS guard, and command classifier are heuristics, not a security boundary. There is no sandbox or filesystem jail — Mentor operates with your user's permissions.
-- Automated tests cover the tool layer and the agentic core (via a fake client), plus the pure modules (diff, config, sessions, pricing, args, safety). The thin interactive glue in `src/index.ts` is exercised manually.
+- The Windows classifier rules match common literal spellings; PowerShell parameter abbreviations (`-r` for `-Recurse`), encoded commands (`-EncodedCommand`), and other obfuscation are not recognised.
+- Checkpoints only cover `write_file` / `edit_file` — files changed via `bash` commands are **not** checkpointed and `/undo` cannot revert them. Content is snapshotted as UTF-8 text, the same assumption the file tools already make.
+- `/changes` shows only the current session. `/undo` operates on the most recent change in the on-disk store, which persists in `.mentor/checkpoints/` — so in a directory where a previous Mentor session made the last recorded change, `/undo` can revert that (the post-image hash check still protects anything edited since).
+- Automated tests cover the tool layer and the agentic core (via a fake client), plus the pure modules (diff, config, sessions, checkpoints, pricing, args, safety). The thin interactive glue in `src/index.ts` is exercised manually.
 
 ## Development
 
@@ -157,9 +169,10 @@ src/
 ├── agent.ts       # the dependency-injected agentic loop + retry (unit-tested)
 ├── tools.ts       # the seven tools + guardrails
 ├── diff.ts        # pure line diff for edit/write previews
-├── safety.ts      # dangerous-command classifier
+├── safety.ts      # dangerous-command classifier (POSIX + Windows rules)
 ├── config.ts      # .mentorrc.json + MENTOR.md loading
 ├── session.ts     # local session persistence
+├── checkpoints.ts # turn-level file checkpoints behind /undo and /changes
 ├── pricing.ts     # per-model token pricing
 ├── cli-args.ts    # argv parser for print mode
 └── version.ts     # single source of truth for the version

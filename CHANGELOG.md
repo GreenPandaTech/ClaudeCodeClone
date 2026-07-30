@@ -4,6 +4,38 @@ All notable changes to Mentor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [2.1.0] - 2026-07-30
+
+### Added
+
+- **Turn-level checkpoints with `/undo` and `/changes`** (`src/checkpoints.ts`):
+  before each approved `write_file` / `edit_file` is applied, the pre-image (the
+  file's full prior content, or an explicit did-not-exist marker) and a sha256 of
+  the post-image are recorded, grouped per user turn, under
+  `.mentor/checkpoints/` — made self-ignoring exactly the way
+  `.mentor/sessions/` already is. `/changes` lists every file Mentor changed this
+  session, grouped by turn, with colored diffs from the existing diff renderer.
+  `/undo` reverts the most recent change and `/undo turn` the whole last turn;
+  a revert is refused with a diff whenever the file's current content no longer
+  hashes to the recorded post-image (the user edited it since), so user edits are
+  never clobbered. Old checkpoints are pruned to the last `checkpointTurns` turns
+  (a new `.mentorrc.json` key, positive integer, default 20). Everything sits
+  behind the existing dependency-injected execute seam and is unit-tested with
+  temp dirs and a fake client — no new runtime dependencies, no network.
+- **Windows-aware dangerous-command classifier** (`src/safety.ts`): the bash tool
+  runs cmd.exe on win32, so the rule table now also recognises
+  `del`/`erase`/`rd`/`rmdir` with `/s /q` (caution locally, danger on a drive
+  root or the Windows directory), `format <drive>`, `diskpart`,
+  `reg delete HKLM|HKCU`, PowerShell `Remove-Item -Recurse -Force`,
+  `vssadmin delete shadows`, `taskkill /f` on system-critical processes
+  (csrss, lsass, winlogon, …), and download-and-execute shapes (`iwr … | iex`,
+  `Invoke-Expression` wrapped around a web request or WebClient, downloads piped
+  into cmd/powershell). Keywords are matched at command position only, so benign
+  strings that merely contain one (filenames, echoed messages) do not trip a
+  rule, and ambiguous shapes (bare `Invoke-Expression`, local-path recursive
+  deletes) rate caution rather than danger. Every POSIX rule is unchanged, with
+  table-driven tests in both directions.
+
 ## [2.0.0] - 2026-07-12
 
 A major, backward-compatible expansion turning the compact v1 clone into a safe,
