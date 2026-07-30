@@ -34,6 +34,67 @@ function hasRootTarget(cmd: string): boolean {
   );
 }
 
+// ─── Windows helpers ─────────────────────────────────────────────────────────
+// The bash tool runs cmd.exe on win32 (see tools.ts), so the classifier must
+// recognise cmd.exe and PowerShell threats too, not just POSIX ones. All the
+// Windows matchers anchor the keyword at a command position (start of string or
+// right after a separator), so a benign argument or filename that merely
+// contains the word — "echo del /s /q is dangerous" — does not trip a rule.
+
+/** Find `names` (a regex alternation) invoked as a command — at the start of
+ *  the string or straight after ; & | ( — and return the rest of that command
+ *  segment (up to the next separator), or null when not invoked. */
+function commandSegment(cmd: string, names: string): string | null {
+  const re = new RegExp(`(?:^|[;&|(])\\s*(?:${names})(?:\\.exe|\\.com)?\\b([^\\n;|&]*)`, "i");
+  const m = cmd.match(re);
+  return m ? m[1] : null;
+}
+
+/** Like commandSegment, but also treats quotes and { as separators, so cmdlets
+ *  inside `powershell -Command "..."` / script blocks are still recognised. */
+function psCommandSegment(cmd: string, names: string): string | null {
+  const re = new RegExp(`(?:^|[;&|({"'])\\s*(?:${names})\\b([^\\n;|&]*)`, "i");
+  const m = cmd.match(re);
+  return m ? m[1] : null;
+}
+
+/** del/erase/rd/rmdir carrying both /s (recursive) and /q (quiet), any order. */
+function isCmdRecursiveDelete(cmd: string): boolean {
+  const seg = commandSegment(cmd, "del|erase|rd|rmdir");
+  if (seg === null) return false;
+  return /(^|\s)\/s\b/i.test(seg) && /(^|\s)\/q\b/i.test(seg);
+}
+
+/** PowerShell Remove-Item carrying both -Recurse and -Force (full flag names —
+ *  single-letter abbreviations are a documented gap of this heuristic). */
+function isPsRecursiveForceRemove(cmd: string): boolean {
+  const seg = psCommandSegment(cmd, "remove-item");
+  if (seg === null) return false;
+  return /(^|\s)-recurse\b/i.test(seg) && /(^|\s)-force\b/i.test(seg);
+}
+
+/** Does the command name a drive root (C:\, D:/, c:\*, a bare C:), the Windows
+ *  system directory, or their environment-variable spellings as a target? */
+function hasDriveRootTarget(cmd: string): boolean {
+  return (
+    /(^|[\s"'])[a-z]:[\\/]?\*?(["']|\s|$)/i.test(cmd) ||
+    /[a-z]:[\\/](windows|system32)\b/i.test(cmd) ||
+    /%(systemroot|systemdrive|windir)%/i.test(cmd)
+  );
+}
+
+// Processes Windows cannot run without — force-killing them crashes or bricks
+// the running session. Killing an ordinary app (node.exe, chrome.exe) is normal.
+const CRITICAL_WINDOWS_PROCESSES = "csrss|wininit|winlogon|lsass|smss|services|svchost";
+
+/** taskkill with /f (force) aimed at a system-critical process image. */
+function isForceKillOfCriticalProcess(cmd: string): boolean {
+  const seg = commandSegment(cmd, "taskkill");
+  if (seg === null) return false;
+  if (!/(^|\s)\/f\b/i.test(seg)) return false;
+  return new RegExp(`/im\\s+"?(${CRITICAL_WINDOWS_PROCESSES})(\\.exe)?\\b`, "i").test(seg);
+}
+
 interface Rule {
   test: (cmd: string) => boolean;
   level: RiskLevel;
@@ -91,6 +152,83 @@ const RULES: Rule[] = [
     test: (c) => /(^|\s|&&|;|\|)\s*sudo\b/.test(c),
     level: "caution",
     reason: "runs with elevated (root) privileges",
+  },
+
+  // ─── Windows (cmd.exe / PowerShell) rules ──────────────────────────────────
+  {
+    test: (c) => isCmdRecursiveDelete(c) && hasDriveRootTarget(c),
+    level: "danger",
+    reason: "recursively deletes a drive root or the Windows directory",
+  },
+  {
+    test: (c) => isCmdRecursiveDelete(c),
+    level: "caution",
+    reason: "recursively deletes files without confirmation (irreversible)",
+  },
+  {
+    test: (c) => isPsRecursiveForceRemove(c) && (hasDriveRootTarget(c) || hasRootTarget(c)),
+    level: "danger",
+    reason: "Remove-Item -Recurse -Force on a drive root or home directory",
+  },
+  {
+    test: (c) => isPsRecursiveForceRemove(c),
+    level: "caution",
+    reason: "recursively force-deletes files via PowerShell (irreversible)",
+  },
+  {
+    test: (c) => {
+      const seg = commandSegment(c, "format");
+      return seg !== null && /(^|\s)[a-z]:(\s|$)/i.test(seg);
+    },
+    level: "danger",
+    reason: "formats a drive (destroys its filesystem)",
+  },
+  {
+    test: (c) => commandSegment(c, "diskpart") !== null,
+    level: "danger",
+    reason: "launches diskpart, which can wipe partitions and volumes",
+  },
+  {
+    test: (c) => {
+      const seg = commandSegment(c, "reg");
+      return seg !== null && /^\s*delete\s+"?(hklm|hkcu|hkey_local_machine|hkey_current_user)\b/i.test(seg);
+    },
+    level: "danger",
+    reason: "deletes registry keys under HKLM or HKCU",
+  },
+  {
+    test: (c) => {
+      const seg = commandSegment(c, "vssadmin");
+      return seg !== null && /\bdelete\b/i.test(seg) && /\bshadows\b/i.test(seg);
+    },
+    level: "danger",
+    reason: "deletes Volume Shadow Copies (restore points and backups)",
+  },
+  {
+    test: (c) => isForceKillOfCriticalProcess(c),
+    level: "danger",
+    reason: "force-kills a system-critical Windows process",
+  },
+  {
+    // download piped into a Windows shell or Invoke-Expression
+    test: (c) =>
+      /\b(curl|wget|iwr|invoke-webrequest|certutil|bitsadmin)(\.exe)?\b[^|]*\|\s*(cmd|powershell|pwsh|iex|invoke-expression)\b/i.test(c),
+    level: "danger",
+    reason: "pipes a remote download into a Windows shell or Invoke-Expression",
+  },
+  {
+    // Invoke-Expression wrapped around a web request or WebClient download
+    test: (c) =>
+      /\b(iex|invoke-expression)\s*\(\s*(iwr|invoke-webrequest|new-object\s+(system\.)?net\.webclient)\b/i.test(c),
+    level: "danger",
+    reason: "downloads and executes remote code via Invoke-Expression",
+  },
+  {
+    // Ambiguity discipline: executing a dynamically built string is suspicious
+    // but not provably fetching remote code — rate caution, not danger.
+    test: (c) => psCommandSegment(c, "iex|invoke-expression") !== null,
+    level: "caution",
+    reason: "executes a dynamically built string (Invoke-Expression)",
   },
 ];
 
