@@ -77,7 +77,9 @@ const WINDOWS_DANGER: string[] = [
   // recursive quiet deletes aimed at a drive root or the Windows directory
   "del /s /q C:\\",
   "del /q /s c:\\*",
+  "del /s/q C:\\", // cmd.exe accepts concatenated switches
   "rd /s /q C:\\Windows",
+  "rd/s/q C:\\", // ... even glued straight onto the command name
   "rmdir /S /Q D:\\",
   "Remove-Item -Recurse -Force C:\\",
   'powershell -Command "Remove-Item -Recurse -Force C:\\Windows"',
@@ -91,6 +93,7 @@ const WINDOWS_DANGER: string[] = [
   "reg delete HKCU\\Software\\MyApp",
   // shadow-copy (backup/restore-point) destruction
   "vssadmin delete shadows /all /quiet",
+  "vssadmin delete shadowstorage /on=c:", // destroys shadow-copy capacity too
   // force-killing system-critical processes
   "taskkill /F /IM lsass.exe",
   "taskkill /f /im winlogon.exe /t",
@@ -120,6 +123,8 @@ const WINDOWS_NORMAL: string[] = [
   "del build\\app.obj",
   "del /q temp.txt",
   "rd emptydir",
+  "del src/query.txt src/select.txt", // forward-slash paths are not switches
+  "vssadmin list shadows",
   "Remove-Item .\\file.txt -Force",
   // format/diskpart/reg/taskkill keywords in benign positions
   "npm run format",

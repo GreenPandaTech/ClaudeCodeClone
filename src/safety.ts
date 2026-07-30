@@ -86,11 +86,15 @@ function stripOneWrapper(cmd: string): string | null {
   return null;
 }
 
-/** del/erase/rd/rmdir carrying both /s (recursive) and /q (quiet), any order. */
+/** del/erase/rd/rmdir carrying both /s (recursive) and /q (quiet), any order.
+ *  cmd.exe accepts concatenated switches (del /s/q, even rd/s/q), so a switch
+ *  counts when its run starts at whitespace or at the segment start — a
+ *  forward-slash PATH (del src/query.txt) starts at a word character and does
+ *  not. */
 function isCmdRecursiveDelete(cmd: string): boolean {
   const seg = commandSegment(cmd, "del|erase|rd|rmdir");
   if (seg === null) return false;
-  return /(^|\s)\/s\b/i.test(seg) && /(^|\s)\/q\b/i.test(seg);
+  return /(^|\s)(\/[a-z]+)*\/s\b/i.test(seg) && /(^|\s)(\/[a-z]+)*\/q\b/i.test(seg);
 }
 
 /** PowerShell Remove-Item carrying both -Recurse and -Force (full flag names —
@@ -227,7 +231,7 @@ const RULES: Rule[] = [
   {
     test: (c) => {
       const seg = commandSegment(c, "vssadmin");
-      return seg !== null && /\bdelete\b/i.test(seg) && /\bshadows\b/i.test(seg);
+      return seg !== null && /\bdelete\b/i.test(seg) && /\bshadow(s|storage)\b/i.test(seg);
     },
     level: "danger",
     reason: "deletes Volume Shadow Copies (restore points and backups)",
