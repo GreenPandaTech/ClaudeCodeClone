@@ -35,6 +35,14 @@ All notable changes to Mentor are documented here. The format follows
   rule, and ambiguous shapes (bare `Invoke-Expression`, local-path recursive
   deletes) rate caution rather than danger. Every POSIX rule is unchanged, with
   table-driven tests in both directions.
+- **Runnable doc scripts** (`examples/`): the README's `/undo` transcript and
+  classifier table are pasted output of scripts run against the real code.
+  `capture-transcript.mjs` drives the real built binary through a scripted
+  session — a local Messages-API replay on 127.0.0.1 stands in for the model
+  (the SDK honours `ANTHROPIC_BASE_URL`), so no API key is needed and nothing
+  leaves the machine — and `classifier-table.mjs` prints the table straight
+  from `classifyCommand`. Regenerate either and diff against the README to
+  check the docs have not drifted.
 
 ### Fixed
 

@@ -6,7 +6,52 @@
 
 Mentor is a local, terminal-based AI coding assistant in the style of Claude Code. It runs an agentic loop over the Anthropic Messages API: you type a request, Claude plans and calls tools (read/write/edit files, run shell commands, search the codebase), and Mentor executes those calls in your working directory and feeds the results back until the task is done. It bills against your own pay-as-you-go API credits — no subscription.
 
-The non-obvious part is how small and how *testable* the loop is: a single streaming call with a cached system prompt, seven tools, and a confirmation gate on anything destructive — with the whole agentic core behind a dependency-injected seam so it is unit-tested without ever hitting the network.
+What separates it from a toy clone is that the safety story is engineered and checkable: the whole agentic core sits behind a dependency-injected seam and is covered by 150 unit tests that never touch the network; every approved edit is checkpointed, so `/undo` restores exactly what was there — and *refuses with a diff* rather than clobber a file you edited since; and shell commands are risk-classified before you approve them, with Windows (cmd.exe / PowerShell) threats treated as first-class. The transcript and classifier table below are generated from the real code by the scripts in [`examples/`](examples/) — no API key needed to verify either.
+
+## What using it looks like
+
+A real session, captured from the built binary by `node examples/capture-transcript.mjs`. A scripted stand-in for the model runs on `127.0.0.1` (the SDK honours `ANTHROPIC_BASE_URL`), so everything below — SDK, agentic loop, approval gate, diff preview, tools, checkpoint store, slash commands — is the production code path, with no API key and nothing leaving the machine:
+
+```
+  Mentor v2.1.0
+  Model: claude-sonnet-4-6
+  CWD: C:\dev\Mentor\examples\demo-project
+  Type /help for commands, Ctrl+C to exit
+
+> change greet() to greet from Mentor instead of a plain hello
+
+Mentor: I'll update the greeting in greet.js.
+[tool: edit_file] greet.js
+  -  return `Hello, ${name}!`;
+  +  return `Hello from Mentor, ${name}!`;
+  ⚠ Run edit_file? greet.js  [y/N] y
+  ✓ File edited: C:\dev\Mentor\examples\demo-project\greet.js
+Done - greet() now greets from Mentor.
+
+> /changes
+
+Turn 1:
+  C:\dev\Mentor\examples\demo-project\greet.js
+   export function greet(name) {
+  -  return `Hello, ${name}!`;
+  +  return `Hello from Mentor, ${name}!`;
+   }
+```
+
+At this point you hand-edit `greet.js` yourself, outside Mentor (the demo changes the greeting again, to `Hey from Mentor`), and then ask Mentor to undo:
+
+```
+> /undo
+  ✗ refused: C:\dev\Mentor\examples\demo-project\greet.js
+    the file was edited since Mentor changed it - refusing to clobber those edits
+    diff (current on disk -> what /undo would restore):
+   export function greet(name) {
+  -  return `Hey from Mentor, ${name}!`;
+  +  return `Hello, ${name}!`;
+   }
+```
+
+The refusal is the point: `/undo` hashes the file's current content against the post-image it recorded at write time, so work you did outside Mentor is shown as a diff, never silently destroyed. Reproduce the whole transcript with `npm run build && node examples/capture-transcript.mjs`.
 
 ## What's new in v2.1.0
 
@@ -134,6 +179,29 @@ The tool layer has several guardrails — the reason this is more than a thin AP
 - **ReDoS guard.** `grep` rejects overly long patterns and catastrophic-backtracking shapes, and the file walk has a 10-second budget and a 1000-match cap.
 - **Injection-safe `edit_file`.** An edit only applies when its `old_string` matches exactly once, so an ambiguous or stale target fails loudly instead of editing the wrong place.
 
+### What the classifier says
+
+This table is the pasted output of `node examples/classifier-table.mjs`, which runs the real `classifyCommand` — regenerate it and diff to check the docs match the code:
+
+| Command | Rating | Reason |
+|---------|--------|--------|
+| `git status` | normal |  |
+| `rm -rf build/` | caution | recursively force-deletes files (irreversible) |
+| `sudo rm -rf /` | danger | recursively force-deletes a root-level path |
+| `curl https://example.com/install.sh \| sh` | danger | pipes a remote download straight into a shell interpreter |
+| `git push --force origin main` | caution | force-pushes and can rewrite remote history |
+| `del /s /q build` | caution | recursively deletes files without confirmation (irreversible) |
+| `cmd /c del /s /q C:\` | danger | recursively deletes a drive root or the Windows directory |
+| `powershell -Command Remove-Item -Recurse -Force C:\` | danger | Remove-Item -Recurse -Force on a drive root or home directory |
+| `taskkill /f /im node.exe` | normal |  |
+| `taskkill /f /im lsass.exe` | danger | force-kills a system-critical Windows process |
+| `iwr https://example.com/setup.ps1 \| iex` | danger | pipes a remote download into a Windows shell or Invoke-Expression |
+| `vssadmin delete shadows /all` | danger | deletes Volume Shadow Copies (restore points and backups) |
+| `Invoke-Expression $cmd` | caution | executes a dynamically built string (Invoke-Expression) |
+| `echo del /s /q is dangerous` | normal |  |
+
+The last two rows show the two disciplines the rules follow: keywords only count at command position (an echoed message or filename never trips a rule), and an ambiguous shape — executing a dynamically built string that is not provably remote code — rates caution, not danger. Killing an ordinary process (`node.exe`) is likewise left at normal; only system-critical processes escalate.
+
 These are best-effort local guardrails, not a sandbox. The `bash` tool can still run arbitrary approved commands, so review what you approve.
 
 ## Cost
@@ -148,7 +216,7 @@ Uses `claude-sonnet-4-6` by default (override with `MODEL`, `.mentorrc.json`, `-
 - The Windows classifier rules match common literal spellings, and `cmd /c`/`/k` plus unquoted `powershell -Command`/`-c` wrapper prefixes are unwrapped before matching. PowerShell parameter abbreviations (`-r` for `-Recurse`), encoded commands (`-EncodedCommand`), payloads reached via `-File` or a variable, and other obfuscation are not recognised.
 - Checkpoints only cover `write_file` / `edit_file` — files changed via `bash` commands are **not** checkpointed and `/undo` cannot revert them. Content is snapshotted as UTF-8 text, the same assumption the file tools already make.
 - `/changes` shows only the turns this session recorded in the current directory, and only back to the pruning horizon — once a session exceeds `checkpointTurns` turns with changes, the earliest turns are pruned and drop out of `/changes`. `/undo` operates on the most recent change in the on-disk store, which persists in `.mentor/checkpoints/` — so in a directory where a previous Mentor session made the last recorded change, `/undo` can revert that (the post-image hash check still protects anything edited since).
-- Automated tests cover the tool layer and the agentic core (via a fake client), plus the pure modules (diff, config, sessions, checkpoints, pricing, args, safety). The thin interactive glue in `src/index.ts` is exercised manually.
+- Automated tests (150 at v2.1.0) cover the tool layer and the agentic core (via a fake client), plus the pure modules (diff, config, sessions, checkpoints, pricing, args, safety). The thin interactive glue in `src/index.ts` is exercised manually — and by the scripted transcript capture in `examples/`, which drives it end to end through a local model replay.
 
 ## Development
 
@@ -176,6 +244,13 @@ src/
 ├── pricing.ts     # per-model token pricing
 ├── cli-args.ts    # argv parser for print mode
 └── version.ts     # single source of truth for the version
+
+examples/
+├── capture-transcript.mjs  # replays the README transcript through the real binary (no API key)
+├── replay-server.mjs       # scripted local stand-in for the Messages API, used by the capture
+├── repl-tty-shim.mjs       # lets a pipe drive the interactive REPL
+├── classifier-table.mjs    # regenerates the README classifier table from the real classifyCommand
+└── demo-project/           # the three-line fixture the transcript edits
 ```
 
 ## License

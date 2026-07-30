@@ -9,6 +9,19 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
+    // Runnable doc scripts (transcript capture, classifier table): plain Node
+    // ESM outside the TS build, so declare the Node globals they use.
+    files: ["examples/**/*.mjs"],
+    languageOptions: {
+      globals: {
+        process: "readonly",
+        console: "readonly",
+        setTimeout: "readonly",
+        URL: "readonly",
+      },
+    },
+  },
+  {
     files: ["src/**/*.ts"],
     languageOptions: {
       ecmaVersion: 2022,
