@@ -36,6 +36,24 @@ All notable changes to Mentor are documented here. The format follows
   deletes) rate caution rather than danger. Every POSIX rule is unchanged, with
   table-driven tests in both directions.
 
+### Fixed
+
+- **Wrapper prefixes no longer defeat the Windows rules**: `cmd /c` / `cmd /k`
+  (and `cmd.exe`, including flag runs like `/d /s /c`) and unquoted
+  `powershell`/`pwsh` `-Command` / `-c` prefixes found at a command position are
+  stripped before matching, and every unwrapping stage is classified with the
+  worst rating kept — so `cmd /c del /s /q C:\` or
+  `powershell -Command Remove-Item -Recurse -Force C:\` now rate danger exactly
+  like their payloads instead of slipping through as normal.
+- The cmd.exe recursive-delete rule recognises concatenated switches
+  (`del /s/q`, `rd/s/q`), and the vssadmin rule also flags
+  `vssadmin delete shadowstorage`.
+- `/changes` scopes its this-session filter per directory, so after `/cwd` a
+  turn id allocated here can no longer surface an identically numbered turn a
+  previous session recorded in the new directory.
+- `/undo` rejects an unrecognised argument (for example `/undo 3`) instead of
+  silently performing a single-change undo.
+
 ## [2.0.0] - 2026-07-12
 
 A major, backward-compatible expansion turning the compact v1 clone into a safe,
