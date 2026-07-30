@@ -442,7 +442,14 @@ async function main() {
         }
 
         case "undo": {
-          const wholeTurn = args.join(" ").trim().toLowerCase() === "turn";
+          // The only recognised argument is "turn" — anything else is rejected
+          // rather than silently degrading to a single-change undo.
+          const arg = args.join(" ").trim().toLowerCase();
+          if (arg && arg !== "turn") {
+            console.log(chalk.red(`Unknown /undo argument: ${arg}. Use /undo or /undo turn.`));
+            break;
+          }
+          const wholeTurn = arg === "turn";
           try {
             const res = wholeTurn ? undoLastTurn(process.cwd()) : undoLastChange(process.cwd());
             if (!res) {
