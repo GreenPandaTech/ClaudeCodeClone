@@ -31,6 +31,21 @@ test("parseConfigFile fails loud on wrong types", () => {
   assert.throws(() => parseConfigFile('{"autoApprove":"yes"}'), /autoApprove/);
 });
 
+test("parseConfigFile reads checkpointTurns and validates it strictly", () => {
+  assert.deepEqual(parseConfigFile('{"checkpointTurns":5}'), { checkpointTurns: 5 });
+  assert.throws(() => parseConfigFile('{"checkpointTurns":"many"}'), /checkpointTurns/);
+  assert.throws(() => parseConfigFile('{"checkpointTurns":0}'), /checkpointTurns/);
+  assert.throws(() => parseConfigFile('{"checkpointTurns":-3}'), /checkpointTurns/);
+  assert.throws(() => parseConfigFile('{"checkpointTurns":2.5}'), /checkpointTurns/);
+});
+
+test("checkpointTurns defaults to a sensible positive integer", () => {
+  assert.ok(Number.isInteger(DEFAULT_CONFIG.checkpointTurns) && DEFAULT_CONFIG.checkpointTurns > 0);
+  const dir = tmpDir();
+  fs.writeFileSync(path.join(dir, ".mentorrc.json"), '{"checkpointTurns":7}');
+  assert.equal(loadConfig(dir, {}).checkpointTurns, 7);
+});
+
 // ─── loadConfig ───────────────────────────────────────────────────────────────
 
 test("loadConfig returns defaults when no file and no env", () => {

@@ -10,6 +10,8 @@ export interface MentorConfig {
   autoApprove: boolean;
   /** Extra filenames (basename match) to add to the sensitive-path denylist. */
   extraDenylist: string[];
+  /** How many turns of file checkpoints to keep for /undo and /changes. */
+  checkpointTurns: number;
 }
 
 export const DEFAULT_MODEL = "claude-sonnet-4-6";
@@ -19,6 +21,7 @@ export const DEFAULT_CONFIG: MentorConfig = {
   maxTokens: 64_000,
   autoApprove: false,
   extraDenylist: [],
+  checkpointTurns: 20,
 };
 
 // Cap on project-context size injected into the system prompt.
@@ -57,6 +60,12 @@ export function parseConfigFile(text: string): Partial<MentorConfig> {
       throw new Error("Invalid config: extraDenylist must be an array of strings");
     }
     out.extraDenylist = obj.extraDenylist as string[];
+  }
+  if ("checkpointTurns" in obj) {
+    if (typeof obj.checkpointTurns !== "number" || !Number.isInteger(obj.checkpointTurns) || obj.checkpointTurns <= 0) {
+      throw new Error("Invalid config: checkpointTurns must be a positive integer");
+    }
+    out.checkpointTurns = obj.checkpointTurns;
   }
   return out;
 }
