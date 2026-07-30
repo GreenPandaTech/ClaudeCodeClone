@@ -181,6 +181,29 @@ test("failed tool calls and non-file tools are not checkpointed", async () => {
   assert.deepEqual(listTurns(dir), []);
 });
 
+test("sessionTurns scoped to a directory ignores a colliding turn id elsewhere", async () => {
+  const a = tmpDir();
+  const b = tmpDir();
+  // an EARLIER session already recorded a turn 1 in b
+  recordChange(b, 1, {
+    file: path.join(b, "old.txt"),
+    tool: "write_file",
+    existedBefore: false,
+    before: "",
+    afterHash: hashContent("old"),
+  });
+  // this session works in a (allocating its own turn 1), then /cwd moves it to b
+  let cwd = a;
+  const cp = withCheckpoints(executeTool, { cwd: () => cwd });
+  cp.beginTurn();
+  await writeVia(cp, path.join(a, "mine.txt"), "mine");
+  cwd = b;
+  // the ids collide, but the turn recorded in b is NOT this session's work
+  assert.deepEqual(cp.sessionTurns(a), [1]);
+  assert.deepEqual(cp.sessionTurns(b), []);
+  assert.deepEqual(cp.sessionTurns(), [1]); // unscoped: every turn this session allocated
+});
+
 test("turn ids continue across restarts instead of colliding", async () => {
   const dir = tmpDir();
   const first = makeCheckpointer(dir);

@@ -416,7 +416,9 @@ async function main() {
 
         case "changes": {
           try {
-            const mine = new Set(checkpointer.sessionTurns());
+            // Scoped to the current directory: after /cwd, a turn id allocated
+            // here must not surface another directory's identically numbered turn.
+            const mine = new Set(checkpointer.sessionTurns(process.cwd()));
             const turns = viewChanges(process.cwd()).filter((t) => mine.has(t.turn));
             if (turns.length === 0) {
               console.log(chalk.dim("No files changed this session."));

@@ -297,8 +297,11 @@ export interface Checkpointer {
   execute: (name: string, input: Record<string, unknown>) => Promise<ToolResult>;
   /** Mark the start of a new user turn; the next change starts a new group. */
   beginTurn(): void;
-  /** Turn ids allocated by THIS session, oldest first (drives /changes). */
-  sessionTurns(): number[];
+  /** Turn ids allocated by THIS session, oldest first (drives /changes).
+   *  The store is per-directory, so an id allocated here can collide with an
+   *  unrelated turn in another directory's store — pass dir to scope the list
+   *  to the turns this session allocated in that directory. */
+  sessionTurns(dir?: string): number[];
 }
 
 const CHECKPOINTED_TOOLS = new Set(["write_file", "edit_file"]);
@@ -313,14 +316,15 @@ export function withCheckpoints(
   const cwd = opts.cwd ?? (() => process.cwd());
   const keepTurns = opts.keepTurns ?? DEFAULT_KEEP_TURNS;
   let turnId: number | null = null; // allocated lazily on the turn's first change
-  const allocated: number[] = [];
+  const allocated: { dir: string; turn: number }[] = [];
 
   return {
     beginTurn() {
       turnId = null;
     },
-    sessionTurns() {
-      return [...allocated];
+    sessionTurns(dir) {
+      const scope = dir === undefined ? null : path.resolve(dir);
+      return allocated.filter((a) => scope === null || a.dir === scope).map((a) => a.turn);
     },
     async execute(name, input) {
       if (!CHECKPOINTED_TOOLS.has(name)) return inner(name, input);
@@ -348,7 +352,7 @@ export function withCheckpoints(
         const after = fs.readFileSync(file, "utf-8");
         if (turnId === null) {
           turnId = nextTurnId(cwd());
-          allocated.push(turnId);
+          allocated.push({ dir: path.resolve(cwd()), turn: turnId });
         }
         recordChange(cwd(), turnId, {
           file,
