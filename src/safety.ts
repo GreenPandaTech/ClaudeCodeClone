@@ -264,6 +264,25 @@ const RULES: Rule[] = [
   },
 ];
 
+/** The individual commands a chained line will actually run.
+ *
+ *  Every rule here is built on `String.match` without the /g flag, and the
+ *  helpers stop their segment at the next separator, so a rule only ever
+ *  inspects the FIRST command on the line. `rm build/tmp && rm -rf ~` was
+ *  therefore rated on its harmless first half and reached the plain [y/N]
+ *  prompt with no risk banner — as did `del temp.txt & del /s /q C:\`, and the
+ *  same shape with vssadmin and taskkill. On an irreversible command, the
+ *  mitigation the user relies on was the thing that failed.
+ *
+ *  Splitting here fixes that for every rule at once, rather than rule by rule.
+ */
+function commandSegments(cmd: string): string[] {
+  return cmd
+    .split(/(?:&&|\|\||;|&|\||\n)+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
 export function classifyCommand(command: string): CommandRisk {
   // Unwrap shell wrappers stage by stage (bounded — each strip shortens the
   // string; the cap only guards against surprises). Every stage is classified
@@ -276,9 +295,20 @@ export function classifyCommand(command: string): CommandRisk {
   }
   let best: CommandRisk = { level: "normal", reason: "" };
   for (const cmd of stages) {
-    for (const rule of RULES) {
-      if (rule.test(cmd) && RANK[rule.level] > RANK[best.level]) {
-        best = { level: rule.level, reason: rule.reason };
+    // The whole stage is still classified first, because some rules are ABOUT
+    // the chaining: `curl … | sh` is only remote code execution while the pipe
+    // is intact. Each segment is then classified as well, and since a rule can
+    // only ever raise the rating, looking at both finds more and never less.
+    //
+    // A separator inside a quoted argument — a commit message, say — can yield
+    // a segment that trips a rule it should not. That is the deliberate trade:
+    // an unnecessary banner the user dismisses, against `rm -rf ~` arriving
+    // unannotated.
+    for (const piece of [cmd, ...commandSegments(cmd)]) {
+      for (const rule of RULES) {
+        if (rule.test(piece) && RANK[rule.level] > RANK[best.level]) {
+          best = { level: rule.level, reason: rule.reason };
+        }
       }
     }
   }
