@@ -4,6 +4,70 @@ All notable changes to Mentor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [2.2.0] - 2026-07-31
+
+### Added
+
+- **Context accounting and `/context`** (`src/context.ts`): a pure, deterministic
+  module in the pricing.ts idiom. `contextWindowFor` matches model families
+  (Sonnet 4.6+/Opus 4.6+/5-series = 1M tokens; Haiku and older revisions = 200K;
+  unknown models fall back to a conservative 200K flagged `known:false`);
+  `analyzeContext` breaks usage into system prompt / tool definitions / messages
+  (~4 chars/token heuristic plus a flat per-message overhead), prefers the API's
+  own measured usage from the most recent call (input + cache read + cache write
+  + output) when a turn has run, and decides the auto-compact trigger against
+  the usable window (window minus the `maxTokens` output reservation).
+  `/context` renders it as a meter plus breakdown, always labelling estimates as
+  estimates. Edge-honest percentages: a tiny nonzero fraction reads `<1%`, just
+  under full reads `>99%`.
+- **Conversation compaction and `/compact`** (`src/compact.ts`): the history is
+  rendered to a plain transcript (sidestepping tool_use/tool_result pairing
+  rules; oversized blocks truncated) and summarized through the same injected
+  LlmClient seam the agentic loop uses, then replaced in place by a single
+  marked summary message. A transcript too large for one call — including one
+  that has outgrown the current model's entire window — is split at line
+  boundaries under a conservative 2 chars/token budget and rolled through
+  chunked summarization, so a heavily overflowed session is always recoverable.
+  Every failure path (API error, empty summary, mid-chunk failure) leaves the
+  history untouched; the summary is only spliced in after the final non-empty
+  result.
+- **Auto-compact** with a new `.mentorrc.json` key `autoCompactThreshold`
+  (fraction of the usable window, default 0.8, 0 disables, fail-loud validation
+  like every other key): after each completed turn, Mentor compacts
+  automatically once measured usage crosses the threshold, and says so first.
+  `/model` now warns when the current conversation exceeds the new model's
+  usable window, and a context-overflow API error (400 "prompt is too long")
+  prints a pointer to `/compact`. One-shot print mode never auto-compacts.
+- 48 new offline deterministic tests (context table and estimators, analysis
+  edge cases, meter rendering, transcript rendering, single and chunked
+  compaction, failure paths, usage reporting, config validation, hostile
+  sweeps): 198 total, up from 150 at v2.1.0.
+
+### Fixed
+
+Findings from the adversarial review of this feature, fixed before release:
+
+- **Compaction spend is counted in `/cost`**: `compactHistory` reports each
+  summarization call's usage through a new `onUsage` hook (even when the
+  summary is rejected as empty — the tokens were spent either way), and the
+  REPL feeds it into the same per-model ledger as agent turns. Without this,
+  every `/compact` and auto-compact was a real API call invisible to `/cost`.
+  The compaction call's usage deliberately does not touch the measured context
+  figure, which describes the conversation, not the summarization request.
+- **`/compact` no longer sends the whole transcript as one request**: the
+  chunked rolling path above replaced a single-request design that could not
+  compact a history larger than the current model's window (e.g. a large
+  1M-window session after `/model` to a 200K model) — precisely the state
+  `/compact` exists to fix.
+- **A measured figure of exactly 0 no longer suppresses the estimate**: offline
+  harnesses report all-zero usage; `analyzeContext` now treats 0 as "nothing
+  measured" so the estimate stays in force.
+- **Degenerate `maxTokens` cannot fake an auto-compact trigger**: when
+  `maxTokens` meets or exceeds the model's window, `/context` and the
+  auto-compact path warn that there is no room for input instead of firing a
+  meaningless compaction (the trigger is also floored at one token, so an empty
+  session never trips it).
+
 ## [2.1.0] - 2026-07-30
 
 ### Added

@@ -7,6 +7,8 @@ import {
   estimateMessagesTokens,
   analyzeContext,
   renderContextMeter,
+  formatPercent,
+  isContextOverflowError,
   MESSAGE_OVERHEAD_TOKENS,
 } from "./context.js";
 
@@ -168,6 +170,42 @@ test("analyzeContext computes the auto-compact trigger from the threshold", () =
   assert.equal(justUnder.willAutoCompact, false);
 });
 
+test("a measured figure of exactly 0 is treated as no measurement, not authority", () => {
+  // Offline harnesses (the replay server) report all-zero usage; that must
+  // never suppress the estimate or read as an empty context.
+  const b = analyzeContext({ ...baseOpts(), measuredTokens: 0 });
+  assert.equal(b.measuredTokens, null);
+  assert.equal(b.effectiveTokens, b.estimatedTotal);
+
+  const huge = analyzeContext({
+    ...baseOpts(),
+    messages: [{ role: "user", content: "u".repeat(4_000_000) }] as Message[],
+    measuredTokens: 0,
+  });
+  assert.equal(huge.willAutoCompact, true); // the 1M-token estimate still triggers
+});
+
+test("analyzeContext flags a maxTokens that leaves no room for input", () => {
+  assert.equal(analyzeContext(baseOpts()).maxTokensExceedsWindow, false);
+  const bad = analyzeContext({ ...baseOpts(), model: "claude-haiku-4-5", maxTokens: 300_000 });
+  assert.equal(bad.maxTokensExceedsWindow, true);
+  assert.equal(bad.usableWindow, 1);
+});
+
+test("an empty session never trips auto-compact, even on a degenerate window", () => {
+  const b = analyzeContext({
+    ...baseOpts(),
+    model: "claude-haiku-4-5",
+    maxTokens: 300_000,
+    systemText: "",
+    tools: [],
+    messages: [],
+    measuredTokens: 0,
+  });
+  assert.equal(b.autoCompactAt, 1); // floored to one token, never a 0-token trigger
+  assert.equal(b.willAutoCompact, false);
+});
+
 test("a zero threshold disables auto-compact entirely", () => {
   const b = analyzeContext({ ...baseOpts(), autoCompactThreshold: 0, measuredTokens: 999_999_999 });
   assert.equal(b.autoCompactAt, null);
@@ -198,4 +236,43 @@ test("renderContextMeter clamps the bar but reports overflow honestly", () => {
 test("renderContextMeter is safe on negative and non-finite fractions", () => {
   assert.equal(renderContextMeter(-0.5, 10), "[----------] 0%");
   assert.equal(renderContextMeter(Number.NaN, 10), "[----------] 0%");
+});
+
+test("renderContextMeter never misreads at the rounding edges", () => {
+  assert.equal(renderContextMeter(0.0004, 10), "[----------] <1%"); // not a contradictory 0%
+  assert.equal(renderContextMeter(0.996, 10), "[##########] >99%"); // not a premature 100%
+});
+
+// ─── formatPercent ────────────────────────────────────────────────────────────
+
+test("formatPercent rounds normally away from the edges", () => {
+  assert.equal(formatPercent(0), "0%");
+  assert.equal(formatPercent(0.5), "50%");
+  assert.equal(formatPercent(1), "100%");
+  assert.equal(formatPercent(1.5), "150%");
+});
+
+test("formatPercent is honest at the edges and safe on hostile input", () => {
+  assert.equal(formatPercent(0.004), "<1%");
+  assert.equal(formatPercent(0.996), ">99%");
+  assert.equal(formatPercent(-2), "0%");
+  assert.equal(formatPercent(Number.NaN), "0%");
+  assert.equal(formatPercent(Number.POSITIVE_INFINITY), "0%");
+});
+
+// ─── isContextOverflowError ───────────────────────────────────────────────────
+
+test("isContextOverflowError recognises the API's overflow rejections", () => {
+  assert.equal(
+    isContextOverflowError({ status: 400, message: "prompt is too long: 210015 tokens > 200000 maximum" }),
+    true,
+  );
+  assert.equal(isContextOverflowError(new Error("input length and max_tokens exceed context limit")), true);
+});
+
+test("isContextOverflowError rejects everything else", () => {
+  assert.equal(isContextOverflowError({ status: 429, message: "prompt is too long" }), false); // wrong status
+  assert.equal(isContextOverflowError({ status: 400, message: "invalid tool schema" }), false); // wrong message
+  assert.equal(isContextOverflowError(null), false);
+  assert.equal(isContextOverflowError("prompt is too long"), false); // not an error object
 });

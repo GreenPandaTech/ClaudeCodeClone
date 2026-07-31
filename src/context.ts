@@ -108,7 +108,9 @@ export interface ContextAnalysisOptions {
   tools: readonly unknown[];
   messages: Message[];
   /** Total tokens of the most recent API call (input + cache read + cache write
-   *  + output) when a turn has run; null/omitted when nothing was sent yet. */
+   *  + output) when a turn has run; null/omitted when nothing was sent yet.
+   *  Exactly 0 is treated as "nothing measured" (offline harnesses report
+   *  all-zero usage) so it never suppresses the estimate. */
   measuredTokens?: number | null;
   /** Fraction of the usable window that triggers auto-compact; 0 disables. */
   autoCompactThreshold: number;
@@ -120,13 +122,18 @@ export interface ContextBreakdown {
   windowKnown: boolean;
   /** contextWindow minus the maxTokens output reservation, floored at 1. */
   usableWindow: number;
+  /** True when maxTokens meets or exceeds the model's whole window — no room
+   *  for input, every real request will be rejected. Callers should warn and
+   *  skip auto-compact (compaction cannot fix a degenerate config). */
+  maxTokensExceedsWindow: boolean;
   systemTokens: number;
   toolTokens: number;
   messageTokens: number;
   messageCount: number;
   /** systemTokens + toolTokens + messageTokens (all heuristic estimates). */
   estimatedTotal: number;
-  /** The API-reported figure passed in, or null before the first turn. */
+  /** The API-reported figure passed in; null before the first turn or when
+   *  the report was 0 (treated as no measurement). */
   measuredTokens: number | null;
   /** measuredTokens when available (authoritative), else estimatedTotal. */
   effectiveTokens: number;
@@ -149,13 +156,17 @@ export function analyzeContext(opts: ContextAnalysisOptions): ContextBreakdown {
       `analyzeContext: autoCompactThreshold must be >= 0 and < 1 (0 disables), got ${String(threshold)}`,
     );
   }
-  const measured = opts.measuredTokens ?? null;
-  if (measured !== null && (!Number.isFinite(measured) || measured < 0)) {
-    throw new Error(`analyzeContext: measuredTokens must be a non-negative number, got ${String(measured)}`);
+  const rawMeasured = opts.measuredTokens ?? null;
+  if (rawMeasured !== null && (!Number.isFinite(rawMeasured) || rawMeasured < 0)) {
+    throw new Error(`analyzeContext: measuredTokens must be a non-negative number, got ${String(rawMeasured)}`);
   }
+  // 0 measured tokens means nothing was really measured (offline harnesses
+  // report all-zero usage); the estimate must win, not be suppressed.
+  const measured = rawMeasured !== null && rawMeasured > 0 ? rawMeasured : null;
 
   const window = contextWindowFor(opts.model);
   const usableWindow = Math.max(window.tokens - opts.maxTokens, 1);
+  const maxTokensExceedsWindow = opts.maxTokens >= window.tokens;
 
   const systemTokens = estimateTextTokens(opts.systemText);
   const toolTokens = opts.tools.length === 0 ? 0 : estimateTextTokens(JSON.stringify(opts.tools) ?? "");
@@ -165,7 +176,9 @@ export function analyzeContext(opts: ContextAnalysisOptions): ContextBreakdown {
   const effectiveTokens = measured ?? estimatedTotal;
   const usedFraction = effectiveTokens / usableWindow;
 
-  const autoCompactAt = threshold === 0 ? null : Math.floor(usableWindow * threshold);
+  // Floored at 1: a tiny-but-legal threshold on a small usable window must not
+  // produce a 0-token trigger that fires even on a completely empty session.
+  const autoCompactAt = threshold === 0 ? null : Math.max(Math.floor(usableWindow * threshold), 1);
   const willAutoCompact = autoCompactAt !== null && effectiveTokens >= autoCompactAt;
 
   return {
@@ -173,6 +186,7 @@ export function analyzeContext(opts: ContextAnalysisOptions): ContextBreakdown {
     contextWindow: window.tokens,
     windowKnown: window.known,
     usableWindow,
+    maxTokensExceedsWindow,
     systemTokens,
     toolTokens,
     messageTokens,
@@ -187,11 +201,36 @@ export function analyzeContext(opts: ContextAnalysisOptions): ContextBreakdown {
   };
 }
 
+/** Format a fraction as a percentage that never misreads at the edges: a tiny
+ *  nonzero fraction renders "<1%" (not a contradictory "0%") and a fraction
+ *  just under one renders ">99%" (not "100%"). */
+export function formatPercent(fraction: number): string {
+  if (!Number.isFinite(fraction)) return "0%";
+  const pct = Math.max(fraction, 0) * 100;
+  const rounded = Math.round(pct);
+  if (pct > 0 && rounded === 0) return "<1%";
+  if (pct < 100 && rounded === 100) return ">99%";
+  return `${rounded}%`;
+}
+
+/** True when an error is the API's own context-window-overflow rejection —
+ *  the state where the next call can only succeed after compaction. Matches
+ *  the Messages API's known phrasings ("prompt is too long: N tokens > M
+ *  maximum", "input length and max_tokens exceed context limit"); any error
+ *  carrying a non-400 status is never an overflow. */
+export function isContextOverflowError(err: unknown): boolean {
+  if (err === null || typeof err !== "object") return false;
+  const e = err as { status?: unknown; message?: unknown };
+  if (e.status !== undefined && e.status !== 400) return false;
+  const msg = typeof e.message === "string" ? e.message : "";
+  return /prompt is too long|exceeds? (the )?context (limit|window)/i.test(msg);
+}
+
 /** Render a fixed-width usage bar: the bar clamps to full, the percentage does
  *  not — an overfull context honestly reads e.g. "[##########] 150%". */
 export function renderContextMeter(fraction: number, width = 20): string {
   const safe = Number.isFinite(fraction) ? Math.max(fraction, 0) : 0;
   const filled = Math.min(Math.round(safe * width), width);
   const bar = "#".repeat(filled) + "-".repeat(width - filled);
-  return `[${bar}] ${Math.round(safe * 100)}%`;
+  return `[${bar}] ${formatPercent(safe)}`;
 }

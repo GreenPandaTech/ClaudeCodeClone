@@ -1,6 +1,6 @@
 {
   "name": "mentor",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "A local Claude Code style AI coding assistant CLI powered by the Anthropic API",
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",

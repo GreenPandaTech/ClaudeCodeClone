@@ -1,19 +1,19 @@
 # Mentor - a terminal AI coding assistant on the Anthropic API
 
 [![CI](https://github.com/GreenPandaTech/Mentor/actions/workflows/ci.yml/badge.svg)](https://github.com/GreenPandaTech/Mentor/actions/workflows/ci.yml)
-![version](https://img.shields.io/badge/version-v2.1.0-blue)
+![version](https://img.shields.io/badge/version-v2.2.0-blue)
 ![node](https://img.shields.io/badge/node-22%2B-green)
 
 Mentor is a local, terminal-based AI coding assistant in the style of Claude Code. It runs an agentic loop over the Anthropic Messages API: you type a request, Claude plans and calls tools (read/write/edit files, run shell commands, search the codebase), and Mentor executes those calls in your working directory and feeds the results back until the task is done. It bills against your own pay-as-you-go API credits — no subscription.
 
-What separates it from a toy clone is that the safety story is engineered and checkable: the whole agentic core sits behind a dependency-injected seam and is covered by 150 unit tests that never touch the network; every approved edit is checkpointed, so `/undo` restores exactly what was there — and *refuses with a diff* rather than clobber a file you edited since; and shell commands are risk-classified before you approve them, with Windows (cmd.exe / PowerShell) threats treated as first-class. The transcript and classifier table below are generated from the real code by the scripts in [`examples/`](examples/) — no API key needed to verify either.
+What separates it from a toy clone is that the safety story is engineered and checkable: the whole agentic core sits behind a dependency-injected seam and is covered by 198 unit tests that never touch the network; every approved edit is checkpointed, so `/undo` restores exactly what was there — and *refuses with a diff* rather than clobber a file you edited since; shell commands are risk-classified before you approve them, with Windows (cmd.exe / PowerShell) threats treated as first-class; and long sessions stay recoverable — `/context` shows exactly where the window is going and `/compact` (or the auto-compact threshold) summarizes the conversation in place, in chunks if it has outgrown the model. The transcript and classifier table below are generated from the real code by the scripts in [`examples/`](examples/) — no API key needed to verify either.
 
 ## What using it looks like
 
 A real session, captured from the built binary by `node examples/capture-transcript.mjs`. A scripted stand-in for the model runs on `127.0.0.1` (the SDK honours `ANTHROPIC_BASE_URL`), so everything below — SDK, agentic loop, approval gate, diff preview, tools, checkpoint store, slash commands — is the production code path, with no API key and nothing leaving the machine:
 
 ```
-  Mentor v2.1.0
+  Mentor v2.2.0
   Model: claude-sonnet-4-6
   CWD: C:\dev\Mentor\examples\demo-project
   Type /help for commands, Ctrl+C to exit
@@ -52,6 +52,12 @@ At this point you hand-edit `greet.js` yourself, outside Mentor (the demo change
 ```
 
 The refusal is the point: `/undo` hashes the file's current content against the post-image it recorded at write time, so work you did outside Mentor is shown as a diff, never silently destroyed. Reproduce the whole transcript with `npm run build && node examples/capture-transcript.mjs`.
+
+## What's new in v2.2.0
+
+- **A context meter: `/context`.** Shows the model's context window (1M tokens for the Sonnet 4.6+/Opus 4.6+/5-series families, 200K for Haiku and older revisions, a conservative 200K for unknown models — the same family matching the pricing table uses), how much of it is usable after the `maxTokens` output reservation, and a usage bar with a breakdown into system prompt, tool definitions, and messages. Figures are the API's own measured usage from the most recent call when a turn has run (input + cache read + cache write + output — authoritative), otherwise a clearly labelled ~4 chars/token estimate.
+- **Conversation compaction: `/compact`.** Renders the history to a plain transcript (sidestepping tool_use/tool_result pairing rules) and summarizes it through the same injected client seam the agentic loop uses, replacing the history with a single marked summary message. A transcript too large for one call — including one that has outgrown the current model's window entirely — is split and rolled through **chunked summarization**, so an overflowed session is always recoverable. Every failure path (API error, empty summary, mid-chunk failure) leaves the history untouched. Compaction calls are real API calls and are **counted in `/cost`**.
+- **Auto-compact.** After each turn, if measured context usage crosses `autoCompactThreshold` (a new `.mentorrc.json` key: fraction of the usable window, default `0.8`, `0` disables), Mentor compacts automatically and says so. `/model` warns when the conversation exceeds the new model's usable window, and a context-overflow API error points at `/compact` for recovery.
 
 ## What's new in v2.1.0
 
@@ -128,6 +134,8 @@ In one-shot mode the assistant's text goes to stdout and tool activity to stderr
 | `/help` | Show help |
 | `/clear` | Clear conversation history |
 | `/cost` | Token usage and estimated cost, per model |
+| `/context` | Context-usage meter: window, usable input budget, breakdown, auto-compact status |
+| `/compact` | Summarize the conversation into one message to free context (chunked when oversized) |
 | `/cwd <path>` | Change the working directory |
 | `/model [id]` | Show or switch the model for later turns |
 | `/save [name]` | Save this conversation to `.mentor/sessions` |
@@ -147,7 +155,8 @@ Drop a `.mentorrc.json` in your project root to set defaults:
   "maxTokens": 64000,
   "autoApprove": false,
   "extraDenylist": ["secrets.json", "internal-notes.md"],
-  "checkpointTurns": 20
+  "checkpointTurns": 20,
+  "autoCompactThreshold": 0.8
 }
 ```
 
@@ -206,7 +215,7 @@ These are best-effort local guardrails, not a sandbox. The `bash` tool can still
 
 ## Cost
 
-Uses `claude-sonnet-4-6` by default (override with `MODEL`, `.mentorrc.json`, `--model`, or `/model`). `/cost` tracks usage **per model** and prices each with its own family rates (opus / sonnet / haiku), so switching models mid-session stays accurate; an unrecognised model is priced at Sonnet-class rates and clearly labelled an estimate. The system prompt is cached (`cache_control: ephemeral`) and a cache breakpoint is set on the latest user turn, so repeated context is served at the cache-read rate.
+Uses `claude-sonnet-4-6` by default (override with `MODEL`, `.mentorrc.json`, `--model`, or `/model`). `/cost` tracks usage **per model** and prices each with its own family rates (opus / sonnet / haiku), so switching models mid-session stays accurate; an unrecognised model is priced at Sonnet-class rates and clearly labelled an estimate. The system prompt is cached (`cache_control: ephemeral`) and a cache breakpoint is set on the latest user turn, so repeated context is served at the cache-read rate. `/compact` and auto-compact make real API calls of their own — near a 1M-token threshold a compaction is a large request — so their usage is counted in `/cost` like any turn, and `/context` shows the auto-compact trigger before it fires.
 
 ## Scope and limitations
 
@@ -216,7 +225,9 @@ Uses `claude-sonnet-4-6` by default (override with `MODEL`, `.mentorrc.json`, `-
 - The Windows classifier rules match common literal spellings, and `cmd /c`/`/k` plus unquoted `powershell -Command`/`-c` wrapper prefixes are unwrapped before matching. PowerShell parameter abbreviations (`-r` for `-Recurse`), encoded commands (`-EncodedCommand`), payloads reached via `-File` or a variable, and other obfuscation are not recognised.
 - Checkpoints only cover `write_file` / `edit_file` — files changed via `bash` commands are **not** checkpointed and `/undo` cannot revert them. Content is snapshotted as UTF-8 text, the same assumption the file tools already make.
 - `/changes` shows only the turns this session recorded in the current directory, and only back to the pruning horizon — once a session exceeds `checkpointTurns` turns with changes, the earliest turns are pruned and drop out of `/changes`. `/undo` operates on the most recent change in the on-disk store, which persists in `.mentor/checkpoints/` — so in a directory where a previous Mentor session made the last recorded change, `/undo` can revert that (the post-image hash check still protects anything edited since).
-- Automated tests (150 at v2.1.0) cover the tool layer and the agentic core (via a fake client), plus the pure modules (diff, config, sessions, checkpoints, pricing, args, safety). The thin interactive glue in `src/index.ts` is exercised manually — and by the scripted transcript capture in `examples/`, which drives it end to end through a local model replay.
+- Context figures are honest but approximate: the ~4 chars/token estimate is labelled as such, and the measured figure comes from the **last** API call — after `/model` it can describe a different model's tokenizer until the next turn self-corrects it. The context-window table matches model families, not exact ids; unknown models get a conservative 200K.
+- Auto-compact fires **after** a turn completes, not mid-turn — a single enormous turn can still overflow before the check runs (the overflow error then points at `/compact`, which recovers via chunked summarization). Compaction summarizes the whole history into one message; there is no keep-recent-turns tail, a deliberate choice to avoid splitting tool_use/tool_result pairs. One-shot print mode never auto-compacts.
+- Automated tests (198 at v2.2.0) cover the tool layer and the agentic core (via a fake client), plus the pure modules (diff, config, sessions, checkpoints, pricing, args, safety, context, compact). The thin interactive glue in `src/index.ts` is exercised manually — and by the scripted transcript capture in `examples/`, which drives it end to end through a local model replay.
 
 ## Development
 
@@ -242,6 +253,8 @@ src/
 ├── session.ts     # local session persistence
 ├── checkpoints.ts # turn-level file checkpoints behind /undo and /changes
 ├── pricing.ts     # per-model token pricing
+├── context.ts     # context accounting: window table, estimates, auto-compact decision
+├── compact.ts     # transcript rendering + (chunked) summarization for /compact
 ├── cli-args.ts    # argv parser for print mode
 └── version.ts     # single source of truth for the version
 

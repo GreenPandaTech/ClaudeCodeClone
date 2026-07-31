@@ -13,7 +13,13 @@ import { parseArgs } from "./cli-args.js";
 import { saveSession, loadSession, listSessions } from "./session.js";
 import { withCheckpoints, viewChanges, undoLastChange, undoLastTurn } from "./checkpoints.js";
 import { estimateCost, type ModelUsage } from "./pricing.js";
-import { analyzeContext, renderContextMeter, type ContextBreakdown } from "./context.js";
+import {
+  analyzeContext,
+  renderContextMeter,
+  formatPercent,
+  isContextOverflowError,
+  type ContextBreakdown,
+} from "./context.js";
 import { compactHistory } from "./compact.js";
 import { runAgenticLoop, runOnce, type AgentContext, type LlmClient, type LlmStream, type Message } from "./agent.js";
 import { VERSION } from "./version.js";
@@ -217,7 +223,10 @@ const usageByModel: Record<string, ModelUsage> = {};
 // whenever the history is replaced (/clear, /resume, /compact, auto-compact).
 let lastPromptTokens: number | null = null;
 
-function trackUsage(model: string, usage: Anthropic.Usage) {
+// Accumulate one API call's usage into the per-model /cost ledger. EVERY real
+// call goes through here — agent turns and compaction calls alike, so /cost
+// never under-reports the session's actual spend.
+function recordUsage(model: string, usage: Anthropic.Usage) {
   const u = (usageByModel[model] ??= {
     inputTokens: 0,
     outputTokens: 0,
@@ -228,7 +237,13 @@ function trackUsage(model: string, usage: Anthropic.Usage) {
   u.outputTokens += usage.output_tokens;
   u.cacheReadTokens += usage.cache_read_input_tokens ?? 0;
   u.cacheWriteTokens += usage.cache_creation_input_tokens ?? 0;
+}
 
+// An agent turn additionally updates the measured context figure. Compaction
+// calls must NOT come through here: their usage describes the summarization
+// request, not the conversation that remains afterwards.
+function trackTurnUsage(model: string, usage: Anthropic.Usage) {
+  recordUsage(model, usage);
   // input + cache read + cache write is the full prompt actually processed;
   // the output tokens become part of the next request's prompt.
   lastPromptTokens =
@@ -291,6 +306,15 @@ function printContext(b: ContextBreakdown) {
         ` (window minus the ${config.maxTokens.toLocaleString()}-token output reservation)`,
     ),
   );
+  if (b.maxTokensExceedsWindow) {
+    console.log(
+      chalk.yellow(
+        `  ⚠ maxTokens (${config.maxTokens.toLocaleString()}) meets or exceeds this model's` +
+          ` ${b.contextWindow.toLocaleString()}-token window — no room for input;` +
+          " lower maxTokens or switch models",
+      ),
+    );
+  }
   console.log(
     "  " +
       renderContextMeter(b.usedFraction) +
@@ -337,17 +361,21 @@ async function runCompact(messages: Message[], auto: boolean): Promise<void> {
       client: llm,
       model: config.model,
       maxTokens: config.maxTokens,
+      // Compaction calls are real API calls: count them in /cost. They do not
+      // touch lastPromptTokens — that figure describes the conversation.
+      onUsage: (usage) => recordUsage(config.model, usage),
     });
     if (!res) {
       console.log(chalk.dim("Nothing to compact."));
       return;
     }
     lastPromptTokens = null; // the old measurement described the old history
+    const calls = res.chunksSummarized > 1 ? `, ${res.chunksSummarized} chunked summarization calls` : "";
     console.log(
       chalk.green(`  ✓ compacted ${res.messagesBefore} message${res.messagesBefore === 1 ? "" : "s"} → 1`) +
         chalk.dim(
           ` (~${res.estimatedTokensBefore.toLocaleString()} → ~${res.estimatedTokensAfter.toLocaleString()}` +
-            " estimated message tokens)",
+            ` estimated message tokens${calls})`,
         ),
     );
   } catch (err) {
@@ -359,10 +387,21 @@ async function runCompact(messages: Message[], auto: boolean): Promise<void> {
 async function maybeAutoCompact(messages: Message[]): Promise<void> {
   const b = currentBreakdown(messages);
   if (!b.willAutoCompact) return;
+  if (b.maxTokensExceedsWindow) {
+    // Degenerate config: the whole window is reserved for output, so the
+    // trigger is meaningless and compaction cannot help. Warn, do not spend.
+    console.log(
+      chalk.yellow(
+        `\n  ⚠ auto-compact skipped: maxTokens (${config.maxTokens.toLocaleString()}) meets or exceeds` +
+          ` this model's ${b.contextWindow.toLocaleString()}-token window — lower maxTokens or switch models`,
+      ),
+    );
+    return;
+  }
   console.log(
     chalk.yellow(
-      `\n  ⚠ context is at ${Math.round(b.usedFraction * 100)}% of the usable window` +
-        ` (threshold ${Math.round(b.autoCompactThreshold * 100)}%)`,
+      `\n  ⚠ context is at ${formatPercent(b.usedFraction)} of the usable window` +
+        ` (threshold ${formatPercent(b.autoCompactThreshold)})`,
     ),
   );
   await runCompact(messages, true);
@@ -396,7 +435,7 @@ function buildAgentContext(
     ],
     autoApprove: config.autoApprove,
     destructiveTools: DESTRUCTIVE_TOOLS,
-    onUsage: (usage) => trackUsage(config.model, usage),
+    onUsage: (usage) => trackTurnUsage(config.model, usage),
     retry: {
       maxRetries: 3,
       baseDelayMs: 500,
@@ -546,6 +585,17 @@ async function main() {
           } else {
             config.model = name;
             console.log(chalk.dim(`Model set to ${name} for subsequent turns.`));
+            // Switching to a smaller-window model can strand an oversized
+            // conversation; say so now rather than letting the next turn 400.
+            const b = currentBreakdown(messages);
+            if (b.effectiveTokens > b.usableWindow) {
+              console.log(
+                chalk.yellow(
+                  `  ⚠ current context (~${b.effectiveTokens.toLocaleString()} tokens) exceeds this model's` +
+                    ` usable window (${b.usableWindow.toLocaleString()}) — run /compact before the next turn.`,
+                ),
+              );
+            }
           }
           break;
         }
@@ -650,6 +700,16 @@ async function main() {
         console.error(chalk.red(`\nAPI Error ${err.status}: ${err.message}`));
         // Remove the failed message so the user can retry
         messages.pop();
+        if (isContextOverflowError(err)) {
+          // The turn never succeeded, so auto-compact could not fire; point at
+          // the recovery tool (chunked, so it works however far over we are).
+          console.error(
+            chalk.yellow(
+              "  The conversation no longer fits this model's context window —" +
+                " run /compact to summarize it, or /clear to start over.",
+            ),
+          );
+        }
       } else {
         console.error(chalk.red("\nError: " + String(err)));
         messages.pop();
