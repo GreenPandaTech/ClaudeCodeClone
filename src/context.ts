@@ -234,3 +234,56 @@ export function renderContextMeter(fraction: number, width = 20): string {
   const bar = "#".repeat(filled) + "-".repeat(width - filled);
   return `[${bar}] ${formatPercent(safe)}`;
 }
+
+/**
+ * Put exactly ONE cache breakpoint on the newest message, removing any left by
+ * earlier turns.
+ *
+ * The API caps how many `cache_control` blocks a single request may carry. The
+ * REPL used to stamp a fresh breakpoint on each new user message without ever
+ * removing the previous one, so they accumulated: with the system prompt holding
+ * one as well, an ordinary session reached the cap and every send from then on
+ * failed with a hard 400. It needed no unusual input, just a fourth prompt, so
+ * it reproduced in every session — and no test caught it, because none drove the
+ * REPL far enough to reach a fourth turn.
+ *
+ * Mutates in place (the REPL owns one long-lived `messages` array) and is safe
+ * to call on a history restored from disk, which carries whatever breakpoints
+ * were saved with it.
+ */
+export function applyCacheBreakpoint(messages: Message[]): void {
+  for (const m of messages) {
+    if (!Array.isArray(m.content)) continue;
+    for (const block of m.content) {
+      if (block && typeof block === "object" && "cache_control" in block) {
+        delete (block as { cache_control?: unknown }).cache_control;
+      }
+    }
+  }
+
+  const last = messages[messages.length - 1];
+  if (!last) return;
+  if (typeof last.content === "string") {
+    last.content = [
+      { type: "text", text: last.content, cache_control: { type: "ephemeral" } },
+    ] as Message["content"];
+    return;
+  }
+  const blocks = last.content as unknown as Array<Record<string, unknown>>;
+  if (blocks.length > 0) {
+    blocks[blocks.length - 1].cache_control = { type: "ephemeral" };
+  }
+}
+
+/** How many cache breakpoints a message list carries. Used by the tests that
+ *  pin the cap, and useful when debugging a 400 from the caching layer. */
+export function countCacheBreakpoints(messages: Message[]): number {
+  let n = 0;
+  for (const m of messages) {
+    if (!Array.isArray(m.content)) continue;
+    for (const block of m.content) {
+      if (block && typeof block === "object" && "cache_control" in block) n += 1;
+    }
+  }
+  return n;
+}

@@ -10,6 +10,8 @@ import {
   formatPercent,
   isContextOverflowError,
   MESSAGE_OVERHEAD_TOKENS,
+  applyCacheBreakpoint,
+  countCacheBreakpoints,
 } from "./context.js";
 
 // ─── contextWindowFor ─────────────────────────────────────────────────────────
@@ -275,4 +277,49 @@ test("isContextOverflowError rejects everything else", () => {
   assert.equal(isContextOverflowError({ status: 400, message: "invalid tool schema" }), false); // wrong message
   assert.equal(isContextOverflowError(null), false);
   assert.equal(isContextOverflowError("prompt is too long"), false); // not an error object
+});
+
+// The REPL used to stamp a cache breakpoint on each new user message and never
+// remove the previous one, so they accumulated until the request exceeded the
+// API's cap and every send failed with a hard 400 - on the fourth prompt of
+// every session. No test caught it because none drove four turns.
+
+test("a four-turn session never carries more than one cache breakpoint", () => {
+  const messages: Message[] = [];
+  for (let turn = 1; turn <= 6; turn++) {
+    messages.push({ role: "user", content: `prompt ${turn}` });
+    applyCacheBreakpoint(messages);
+    assert.equal(
+      countCacheBreakpoints(messages),
+      1,
+      `turn ${turn} carried ${countCacheBreakpoints(messages)} breakpoints`,
+    );
+    messages.push({ role: "assistant", content: `reply ${turn}` });
+  }
+});
+
+test("the breakpoint is on the NEWEST message, not an older one", () => {
+  const messages: Message[] = [
+    { role: "user", content: "first" },
+    { role: "assistant", content: "reply" },
+    { role: "user", content: "second" },
+  ];
+  applyCacheBreakpoint(messages);
+
+  const first = messages[0].content;
+  assert.equal(Array.isArray(first) ? countCacheBreakpoints([messages[0]]) : 0, 0);
+  assert.equal(countCacheBreakpoints([messages[2]]), 1);
+});
+
+test("a history restored from disk with stale breakpoints is cleaned", () => {
+  // /resume loads whatever was saved, which may carry several breakpoints.
+  const messages: Message[] = [
+    { role: "user", content: [{ type: "text", text: "a", cache_control: { type: "ephemeral" } }] },
+    { role: "assistant", content: [{ type: "text", text: "b", cache_control: { type: "ephemeral" } }] },
+    { role: "user", content: [{ type: "text", text: "c", cache_control: { type: "ephemeral" } }] },
+  ] as unknown as Message[];
+  assert.equal(countCacheBreakpoints(messages), 3, "precondition: a stale history");
+
+  applyCacheBreakpoint(messages);
+  assert.equal(countCacheBreakpoints(messages), 1);
 });

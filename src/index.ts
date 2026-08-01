@@ -19,6 +19,7 @@ import {
   formatPercent,
   isContextOverflowError,
   type ContextBreakdown,
+  applyCacheBreakpoint,
 } from "./context.js";
 import { compactHistory } from "./compact.js";
 import { runAgenticLoop, runOnce, type AgentContext, type LlmClient, type LlmStream, type Message } from "./agent.js";
@@ -674,18 +675,11 @@ async function main() {
     // ── Send to the model ─────────────────────────────────────────────────────
     messages.push({ role: "user", content: input });
 
-    // Add cache breakpoint on the last user message to cache the conversation
-    // prefix (system + prior turns) on every request
-    const lastMsg = messages[messages.length - 1];
-    if (typeof lastMsg.content === "string") {
-      lastMsg.content = [
-        {
-          type: "text",
-          text: lastMsg.content,
-          cache_control: { type: "ephemeral" },
-        },
-      ];
-    }
+    // Exactly ONE cache breakpoint, on the newest message. Stamping one per
+    // turn without removing the previous accumulated them until the request hit
+    // the API's cap and every send failed with a hard 400 - on the fourth prompt
+    // of every session. See applyCacheBreakpoint for why no test caught it.
+    applyCacheBreakpoint(messages);
 
     process.stdout.write(chalk.cyan("\nMentor: "));
 
