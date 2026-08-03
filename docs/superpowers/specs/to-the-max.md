@@ -1,5 +1,13 @@
 # Mentor — to-the-max spec (v2.0.0)
 
+> **Historical document — kept as written.** This is the plan for v2.0.0, drafted
+> when the project was called **Mentor**. The project is now **TerminalAgent**, but
+> the old name is left throughout this file on purpose: a past spec is a record of
+> what was planned, not a description of what exists now. Some of it did not survive
+> contact with the build (the CI matrix is Node 24 only, not "Node 20 + 22"). For
+> the design as actually shipped, read [`../../PRD.md`](../../PRD.md) and
+> [`../../TDD.md`](../../TDD.md).
+
 ## Theme
 
 Mentor v1 is a compact, well-guarded Claude Code–style terminal agent: seven tools,

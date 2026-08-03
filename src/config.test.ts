@@ -6,7 +6,7 @@ import path from "path";
 import { parseConfigFile, loadConfig, loadProjectContext, DEFAULT_CONFIG } from "./config.js";
 
 function tmpDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "mentor-cfg-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "terminalagent-cfg-"));
 }
 
 // ─── parseConfigFile ──────────────────────────────────────────────────────────
@@ -128,9 +128,9 @@ test("loadProjectContext falls back to AGENTS.md", () => {
 
 test("MENTOR.md takes precedence over AGENTS.md", () => {
   const dir = tmpDir();
-  fs.writeFileSync(path.join(dir, "MENTOR.md"), "mentor wins");
+  fs.writeFileSync(path.join(dir, "MENTOR.md"), "project memory wins");
   fs.writeFileSync(path.join(dir, "AGENTS.md"), "agents loses");
-  assert.ok(loadProjectContext(dir)?.includes("mentor wins"));
+  assert.ok(loadProjectContext(dir)?.includes("project memory wins"));
 });
 
 test("loadProjectContext truncates an oversized file with a notice", () => {

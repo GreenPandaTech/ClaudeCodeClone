@@ -1,10 +1,18 @@
 import fs from "fs";
 import path from "path";
 
-// Configuration for a Mentor session, resolved from (in increasing precedence)
+// Configuration for a TerminalAgent session, resolved from (in increasing precedence)
 // built-in defaults, a project-local .mentorrc.json, and environment variables.
+//
+// NAMING: the on-disk names `.mentorrc.json`, `MENTOR.md` and `.mentor/` predate
+// the project's rename from Mentor to TerminalAgent and are deliberately KEPT.
+// They are a data contract, not a label: changing them would silently orphan
+// every existing config file, project-memory file, saved session and checkpoint
+// store in every directory this tool has ever run in. That is a breaking change
+// that belongs in a major release with a read-the-old-name fallback, not in a
+// documentation pass. See docs/TDD.md.
 
-export interface MentorConfig {
+export interface TerminalAgentConfig {
   model: string;
   maxTokens: number;
   autoApprove: boolean;
@@ -18,7 +26,7 @@ export interface MentorConfig {
 
 export const DEFAULT_MODEL = "claude-sonnet-4-6";
 
-export const DEFAULT_CONFIG: MentorConfig = {
+export const DEFAULT_CONFIG: TerminalAgentConfig = {
   model: DEFAULT_MODEL,
   maxTokens: 64_000,
   autoApprove: false,
@@ -31,7 +39,7 @@ export const DEFAULT_CONFIG: MentorConfig = {
 const MAX_PROJECT_CONTEXT = 16_000;
 
 /** Parse the raw text of a .mentorrc.json into a partial config, fail-loud. */
-export function parseConfigFile(text: string): Partial<MentorConfig> {
+export function parseConfigFile(text: string): Partial<TerminalAgentConfig> {
   let raw: unknown;
   try {
     raw = JSON.parse(text);
@@ -42,7 +50,7 @@ export function parseConfigFile(text: string): Partial<MentorConfig> {
     throw new Error("Invalid .mentorrc.json: expected a JSON object");
   }
   const obj = raw as Record<string, unknown>;
-  const out: Partial<MentorConfig> = {};
+  const out: Partial<TerminalAgentConfig> = {};
 
   if ("model" in obj) {
     if (typeof obj.model !== "string") throw new Error("Invalid config: model must be a string");
@@ -87,8 +95,8 @@ export function parseConfigFile(text: string): Partial<MentorConfig> {
 }
 
 /** Resolve the effective config from a config file (if present) and env vars. */
-export function loadConfig(cwd: string, env: Record<string, string | undefined>): MentorConfig {
-  const cfg: MentorConfig = { ...DEFAULT_CONFIG };
+export function loadConfig(cwd: string, env: Record<string, string | undefined>): TerminalAgentConfig {
+  const cfg: TerminalAgentConfig = { ...DEFAULT_CONFIG };
 
   // Layer 1: the config file.
   const file = path.join(cwd, ".mentorrc.json");

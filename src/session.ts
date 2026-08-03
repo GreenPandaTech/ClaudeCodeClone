@@ -7,6 +7,8 @@ import type { Message } from "./agent.js";
 // later. Everything stays on disk in the user's own working directory — nothing
 // is uploaded. Sessions can contain code/output the tools saw, so the .mentor
 // directory is made self-ignoring to keep transcripts out of git by accident.
+// The `.mentor` name predates the rename to TerminalAgent and is kept on purpose
+// so existing stores keep resolving — see the NAMING note in config.ts.
 
 export const SESSION_SCHEMA_VERSION = 1;
 

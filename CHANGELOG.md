@@ -1,8 +1,30 @@
 # Changelog
 
-All notable changes to Mentor are documented here. The format follows
+All notable changes to TerminalAgent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
+
+Releases up to and including 2.2.0 shipped under the project's former name,
+**Mentor**. Those entries are left exactly as they were written — a changelog is
+a record of what was released, so renaming the project does not rewrite it.
+
+## [Unreleased]
+
+### Changed
+
+- **Renamed the project from Mentor to TerminalAgent.** The display name, the
+  system-prompt identity, the REPL banner and speaker label, the npm package
+  name, and the installed command (`mentor` -> `terminal-agent`) all move. After
+  pulling this, re-run `npm link` if you had the old command on your PATH.
+
+### Notes
+
+- The on-disk names `.mentorrc.json`, `MENTOR.md` and `.mentor/` (sessions and
+  checkpoints) are **deliberately unchanged**. They are a data contract rather
+  than a label: renaming them would silently orphan every existing config file,
+  project-memory file, saved session and checkpoint store in every directory the
+  tool has run in. That is a breaking change owed a major version and a
+  read-the-old-name fallback, not a documentation pass. See `docs/TDD.md`.
 
 ## [2.2.0] - 2026-07-31
 

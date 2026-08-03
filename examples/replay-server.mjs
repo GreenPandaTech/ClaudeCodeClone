@@ -1,7 +1,7 @@
 // A tiny local stand-in for the Anthropic Messages streaming API, used by
 // capture-transcript.mjs so the REAL built binary (dist/index.js) can run a
 // scripted conversation with no API key and nothing leaving the machine. The
-// SDK honours ANTHROPIC_BASE_URL, so Mentor itself is completely unmodified —
+// SDK honours ANTHROPIC_BASE_URL, so TerminalAgent itself is completely unmodified —
 // same SDK, same SSE parser, same agentic loop, same tools, same checkpoints.
 //
 // The script is fixed: turn 1 answers the user's prompt with an edit_file tool
@@ -77,7 +77,7 @@ export function startReplayServer() {
 
       if (isToolResult) {
         streamMessage(res, {
-          text: "Done - greet() now greets from Mentor.",
+          text: "Done - greet() now greets from TerminalAgent.",
           stopReason: "end_turn",
         });
       } else {
@@ -89,7 +89,7 @@ export function startReplayServer() {
             input: {
               file_path: "greet.js",
               old_string: "  return `Hello, ${name}!`;",
-              new_string: "  return `Hello from Mentor, ${name}!`;",
+              new_string: "  return `Hello from TerminalAgent, ${name}!`;",
             },
           },
           stopReason: "tool_use",

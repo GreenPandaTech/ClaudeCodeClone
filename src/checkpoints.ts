@@ -9,6 +9,8 @@ import type { ToolResult } from "./tools.js";
 // hash of the post-image, grouped per user turn, under .mentor/checkpoints/ in
 // the working directory. The .mentor directory is made self-ignoring exactly
 // the way .mentor/sessions/ already is, so checkpoints never land in git.
+// The `.mentor` name predates the rename to TerminalAgent and is kept on purpose
+// so existing stores keep resolving — see the NAMING note in config.ts.
 //
 // The safety rule for /undo: a change is only reverted when the file's current
 // content still hashes to the recorded post-image. If the user edited the file
@@ -215,7 +217,7 @@ function revertOne(change: FileChange, result: UndoResult): boolean {
   if (current === null) {
     result.refused.push({
       file: change.file,
-      reason: "the file no longer exists on disk (deleted or unreadable since Mentor changed it)",
+      reason: "the file no longer exists on disk (deleted or unreadable since TerminalAgent changed it)",
       before: change.before,
       current: "",
     });
@@ -224,7 +226,7 @@ function revertOne(change: FileChange, result: UndoResult): boolean {
   if (hashContent(current) !== change.afterHash) {
     result.refused.push({
       file: change.file,
-      reason: "the file was edited since Mentor changed it - refusing to clobber those edits",
+      reason: "the file was edited since TerminalAgent changed it - refusing to clobber those edits",
       before: change.before,
       current,
     });

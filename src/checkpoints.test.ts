@@ -21,7 +21,7 @@ import { runAgenticLoop, type AgentContext, type LlmClient, type LlmStream, type
 import type Anthropic from "@anthropic-ai/sdk";
 
 function tmpDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "mentor-ckpt-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "terminalagent-ckpt-"));
 }
 
 /** A checkpointer over the real tool executor, scoped to a temp dir. */
@@ -250,7 +250,7 @@ test("undoLastChange refuses when the file was edited since, and leaves it alone
   const file = path.join(dir, "a.txt");
   fs.writeFileSync(file, "original", "utf-8");
   const cp = makeCheckpointer(dir);
-  await writeVia(cp, file, "mentor version");
+  await writeVia(cp, file, "agent version");
   fs.writeFileSync(file, "user edited this afterwards", "utf-8");
 
   const res = undoLastChange(dir);
@@ -270,7 +270,7 @@ test("undoLastChange refuses when the file was deleted since", async () => {
   const file = path.join(dir, "a.txt");
   fs.writeFileSync(file, "original", "utf-8");
   const cp = makeCheckpointer(dir);
-  await writeVia(cp, file, "mentor version");
+  await writeVia(cp, file, "agent version");
   fs.unlinkSync(file);
 
   const res = undoLastChange(dir);
@@ -333,8 +333,8 @@ test("undoLastTurn refuses per file: intact files revert, edited ones are kept",
   const b = path.join(dir, "b.txt");
   const cp = makeCheckpointer(dir);
   cp.beginTurn();
-  await writeVia(cp, a, "a-mentor");
-  await writeVia(cp, b, "b-mentor");
+  await writeVia(cp, a, "a-agent");
+  await writeVia(cp, b, "b-agent");
   fs.writeFileSync(b, "b-user-edit", "utf-8");
 
   const res = undoLastTurn(dir);
@@ -402,11 +402,11 @@ test("viewChanges pairs each pre-image with the current on-disk content", async 
   assert.equal(ch.intact, true);
 });
 
-test("viewChanges marks a file edited outside Mentor as not intact", async () => {
+test("viewChanges marks a file edited outside TerminalAgent as not intact", async () => {
   const dir = tmpDir();
   const file = path.join(dir, "a.txt");
   const cp = makeCheckpointer(dir);
-  await writeVia(cp, file, "mentor wrote this");
+  await writeVia(cp, file, "the agent wrote this");
   fs.writeFileSync(file, "user rewrote this", "utf-8");
 
   const ch = viewChanges(dir)[0].changes[0];
@@ -456,7 +456,7 @@ test("the loop drives approved writes through the checkpointing seam and /undo r
   const file = path.join(dir, "hello.txt");
   const cp = makeCheckpointer(dir);
   const client = scriptedClient([
-    { toolUses: [{ id: "t1", name: "write_file", input: { file_path: file, content: "from mentor" } }] },
+    { toolUses: [{ id: "t1", name: "write_file", input: { file_path: file, content: "from the agent" } }] },
     { text: "done" },
   ]);
   const ctx: AgentContext = {
@@ -480,7 +480,7 @@ test("the loop drives approved writes through the checkpointing seam and /undo r
   const messages: Message[] = [{ role: "user", content: "write hello" }];
   await runAgenticLoop(messages, ctx);
 
-  assert.equal(fs.readFileSync(file, "utf-8"), "from mentor");
+  assert.equal(fs.readFileSync(file, "utf-8"), "from the agent");
   assert.equal(viewChanges(dir).length, 1);
 
   const res = undoLastChange(dir);

@@ -79,7 +79,7 @@ export function splitTranscript(transcript: string, budgetChars: number): string
   return chunks.length > 0 ? chunks : [transcript];
 }
 
-const COMPACT_SYSTEM_PROMPT = `You are the conversation summarizer for Mentor, a terminal AI coding assistant.
+const COMPACT_SYSTEM_PROMPT = `You are the conversation summarizer for TerminalAgent, a terminal AI coding assistant.
 You will be given a transcript of a coding session: user requests, assistant replies, tool calls (file reads/writes/edits, shell commands, searches) and their results.
 
 Write a compact summary that preserves everything needed to continue the work:

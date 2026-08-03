@@ -1,4 +1,4 @@
-// A tiny, pure argv parser for Mentor's non-interactive flags. Takes
+// A tiny, pure argv parser for TerminalAgent's non-interactive flags. Takes
 // process.argv.slice(2) and never touches process or the filesystem.
 
 export interface ParsedArgs {

@@ -8,7 +8,7 @@ import { TOOL_DEFINITIONS, executeTool, configureExtraDenylist } from "./tools.j
 import { formatDiff } from "./diff.js";
 import { classifyCommand } from "./safety.js";
 import { readForPreview } from "./preview.js";
-import { loadConfig, loadProjectContext, type MentorConfig } from "./config.js";
+import { loadConfig, loadProjectContext, type TerminalAgentConfig } from "./config.js";
 import { parseArgs } from "./cli-args.js";
 import { saveSession, loadSession, listSessions } from "./session.js";
 import { withCheckpoints, viewChanges, undoLastChange, undoLastTurn } from "./checkpoints.js";
@@ -32,10 +32,10 @@ import { VERSION } from "./version.js";
 const DESTRUCTIVE_TOOLS = new Set(["bash", "write_file", "edit_file"]);
 
 // ─── System prompt (cached — never changes, so stays at the front of the prefix) ──
-// Mentor is honest about being Mentor (an assistant built on the Anthropic API),
+// TerminalAgent is honest about being TerminalAgent (an assistant built on the Anthropic API),
 // not the Claude Code product it is modelled on.
 
-const SYSTEM_PROMPT_BASE = `You are Mentor, an expert AI coding assistant running in the user's terminal, built on the Anthropic API.
+const SYSTEM_PROMPT_BASE = `You are TerminalAgent, an expert AI coding assistant running in the user's terminal, built on the Anthropic API.
 
 You have access to the following tools to help you work with their codebase:
 - read_file: Read file contents with line numbers
@@ -88,7 +88,7 @@ const client = new Anthropic();
 
 // ─── Resolved configuration and system prompt ─────────────────────────────────
 
-function loadConfigOrExit(): MentorConfig {
+function loadConfigOrExit(): TerminalAgentConfig {
   try {
     return loadConfig(process.cwd(), process.env);
   } catch (err) {
@@ -120,7 +120,7 @@ const llm: LlmClient = {
 // ─── UI helpers ───────────────────────────────────────────────────────────────
 
 function printBanner() {
-  console.log(chalk.cyan.bold(`\n  Mentor v${VERSION}`));
+  console.log(chalk.cyan.bold(`\n  TerminalAgent v${VERSION}`));
   console.log(chalk.dim(`  Model: ${config.model}`));
   console.log(chalk.dim(`  CWD: ${process.cwd()}`));
   if (projectContext) console.log(chalk.dim("  Loaded project memory (MENTOR.md / AGENTS.md)"));
@@ -140,7 +140,7 @@ function printHelp() {
   console.log(chalk.cyan("  /save [name]  ") + "Save this conversation to .mentor/sessions");
   console.log(chalk.cyan("  /resume [name]") + " Load a saved conversation");
   console.log(chalk.cyan("  /sessions     ") + "List saved sessions");
-  console.log(chalk.cyan("  /changes      ") + "List files Mentor changed this session, with diffs");
+  console.log(chalk.cyan("  /changes      ") + "List files TerminalAgent changed this session, with diffs");
   console.log(chalk.cyan("  /undo [turn]  ") + "Revert the last file change (or the whole last turn)");
   console.log(chalk.cyan("  /exit         ") + "Exit the program\n");
 }
@@ -616,7 +616,7 @@ async function main() {
               for (const ch of t.changes) {
                 const flags =
                   (ch.existedBefore ? "" : chalk.dim(" (new file)")) +
-                  (ch.intact ? "" : chalk.yellow(" (edited outside Mentor since)"));
+                  (ch.intact ? "" : chalk.yellow(" (edited outside TerminalAgent since)"));
                 console.log(chalk.cyan(`  ${ch.file}`) + flags);
                 printDiffPreview(ch.before, ch.current);
               }
@@ -681,7 +681,7 @@ async function main() {
     // of every session. See applyCacheBreakpoint for why no test caught it.
     applyCacheBreakpoint(messages);
 
-    process.stdout.write(chalk.cyan("\nMentor: "));
+    process.stdout.write(chalk.cyan("\nTerminalAgent: "));
 
     try {
       checkpointer.beginTurn(); // group this prompt's file changes for /undo turn
@@ -725,12 +725,12 @@ async function main() {
 // ─── Non-interactive (print) mode ─────────────────────────────────────────────
 
 function printCliHelp() {
-  console.log(`Mentor v${VERSION} — a terminal AI coding assistant on the Anthropic API
+  console.log(`TerminalAgent v${VERSION} — a terminal AI coding assistant on the Anthropic API
 
 Usage:
-  mentor                     Start the interactive REPL
-  mentor -p "<prompt>"       Run a single prompt and print the result, then exit
-  echo "<prompt>" | mentor   Same, reading the prompt from stdin
+  terminal-agent                     Start the interactive REPL
+  terminal-agent -p "<prompt>"       Run a single prompt and print the result, then exit
+  echo "<prompt>" | terminal-agent   Same, reading the prompt from stdin
 
 Options:
   -p, --print <prompt>   One-shot mode: answer the prompt and exit

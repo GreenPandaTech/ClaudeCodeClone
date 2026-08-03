@@ -14,7 +14,7 @@ import {
 import type { Message } from "./agent.js";
 
 function tmpDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "mentor-sess-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "terminalagent-sess-"));
 }
 
 const SAMPLE: Message[] = [

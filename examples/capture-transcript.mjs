@@ -4,7 +4,7 @@
 //   1. the user asks for a change; the (replayed) model calls edit_file
 //   2. the user approves; the edit applies and is checkpointed
 //   3. /changes shows the diff
-//   4. the user hand-edits greet.js OUTSIDE Mentor
+//   4. the user hand-edits greet.js OUTSIDE TerminalAgent
 //   5. /undo refuses with a diff instead of clobbering the hand edit
 //
 // The model side is examples/replay-server.mjs on 127.0.0.1 (the SDK honours
@@ -25,7 +25,7 @@ const demoDir = path.join(here, "demo-project");
 const greetFile = path.join(demoDir, "greet.js");
 
 const ORIGINAL = "export function greet(name) {\n  return `Hello, ${name}!`;\n}\n";
-const HAND_EDIT = "export function greet(name) {\n  return `Hey from Mentor, ${name}!`;\n}\n";
+const HAND_EDIT = "export function greet(name) {\n  return `Hey from TerminalAgent, ${name}!`;\n}\n";
 
 // Fresh fixture and checkpoint store, so the transcript is identical every run.
 fs.rmSync(path.join(demoDir, ".mentor"), { recursive: true, force: true });
@@ -80,10 +80,10 @@ function typeAndWait(line, suffix) {
 
 try {
   await waitForTail("> ", 0);
-  await typeAndWait("change greet() to greet from Mentor instead of a plain hello", "[y/N] ");
+  await typeAndWait("change greet() to greet from TerminalAgent instead of a plain hello", "[y/N] ");
   await typeAndWait("y", "> ");
   await typeAndWait("/changes", "> ");
-  // The user hand-edits the file OUTSIDE Mentor between /changes and /undo.
+  // The user hand-edits the file OUTSIDE TerminalAgent between /changes and /undo.
   fs.writeFileSync(greetFile, HAND_EDIT, "utf-8");
   await typeAndWait("/undo", "> ");
   child.stdin.write("/exit\n");
