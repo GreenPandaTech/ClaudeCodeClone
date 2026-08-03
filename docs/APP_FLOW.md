@@ -1,13 +1,13 @@
 # App Flow — TerminalAgent
 
-**Date:** 2026-08-03 · **PRD:** [PRD.md](PRD.md) · **TDD:** [TDD.md](TDD.md)
+The interface is a terminal REPL plus a one-shot pipe mode, so "screen" below
+means a distinct state of the terminal rather than a page. Every string quoted
+here is from `src/index.ts`, and the transcript in the README is the real thing,
+captured from the built binary.
 
-> The interface is a terminal REPL plus a one-shot pipe mode. "Screen" below means
-> a distinct state of the terminal, not a page. Every string quoted here is from
-> `src/index.ts`; the transcript in the README is the real thing, captured from the
-> built binary.
+[PRD.md](PRD.md) · [TDD.md](TDD.md)
 
-## Entry points
+## Entry points, and the order startup rejects you in
 
 | How you arrive | What happens |
 |---|---|
@@ -17,31 +17,70 @@
 | `terminal-agent --resume <name>` | REPL seeded from `.mentor/sessions/<name>.json` |
 | `--help` / `--version` | Print and exit 0, **before** the API-key check, so neither needs a key |
 
-Startup is ordered so the cheapest rejections come first: parse argv → help/version
-→ argv errors (exit **2**) → `ANTHROPIC_API_KEY` present (exit **1**) → load config
-(exit **1** on malformed `.mentorrc.json`) → build the system prompt → run.
+Startup is ordered so the cheapest rejections come first: parse argv →
+help/version → argv errors (exit **2**) → `ANTHROPIC_API_KEY` present (exit
+**1**) → load config (exit **1** on malformed `.mentorrc.json`) → build the
+system prompt → run.
 
-## The happy path
+## One turn, end to end
 
-1. **Banner.** Name and version, the resolved model, the working directory,
-   `Loaded project memory (MENTOR.md / AGENTS.md)` if one was found, a yellow
-   `AUTO-APPROVE is ON` line if the gate is off, and `Type /help for commands`.
-2. **Prompt.** A green `> `. The user types a request in plain English.
-3. **Streaming reply.** A cyan `TerminalAgent: ` label, then the model's text
-   streamed token by token as it arrives.
-4. **Tool call.** A yellow `[tool: edit_file] greet.js`. For `edit_file` and
-   `write_file` a coloured unified diff of exactly what will change follows —
-   green `+`, red `-`, dim context, long unchanged runs folded as
-   `… (N unchanged lines)`. For `bash`, the **full untruncated command**, plus a
-   risk banner when the classifier rates it above normal.
-5. **Approval.** `⚠ Run edit_file? greet.js  [y/N] `. Only `y` or `yes`
-   (case-insensitive, trimmed) approves. Empty, `n`, or anything else declines,
-   and the model is told `User declined to run this action.` and carries on.
-6. **Result.** `✓` and the first three lines of output in dim, with
-   `… (N lines)` when there is more; or `✗` and the first five lines in red.
-7. **Loop.** Steps 3–6 repeat until the model stops requesting tools.
-8. **Auto-compact check.** If measured context has crossed the threshold, a yellow
-   notice and an in-place compaction, then back to the prompt.
+**Banner.** Name and version, the resolved model, the working directory,
+`Loaded project memory (MENTOR.md / AGENTS.md)` if one was found, a yellow
+`AUTO-APPROVE is ON` line if the gate is off, and `Type /help for commands`.
+
+**Prompt.** A green `> `. The user types a request in plain English.
+
+**Streaming reply.** A cyan `TerminalAgent: ` label, then the model's text
+streamed token by token as it arrives.
+
+**Tool call.** A yellow `[tool: edit_file] greet.js`. For `edit_file` and
+`write_file`, a coloured unified diff of exactly what will change follows — green
+`+`, red `-`, dim context, long unchanged runs folded as
+`… (N unchanged lines)`. For `bash`, the **full untruncated command**, plus a
+risk banner when the classifier rates it above normal.
+
+**Approval.** `⚠ Run edit_file? greet.js  [y/N] `. Only `y` or `yes`, trimmed and
+case-insensitive, approves. Empty, `n`, or anything else declines, and the model
+is told `User declined to run this action.` and carries on.
+
+**Result.** `✓` and the first three lines of output in dim, with `… (N lines)`
+when there is more; or `✗` and the first five lines in red.
+
+Then the streaming, tool, approval and result steps repeat until the model stops
+requesting tools. Finally, if measured context has crossed the threshold, a
+yellow notice and an in-place compaction, then back to the prompt.
+
+## The four states that matter
+
+**Empty.** Every list command has a real empty string rather than printing
+nothing. The first-run case — no `.mentor/` at all — is not an error anywhere:
+`listTurns` and `listSessions` both catch the missing-directory read and return
+`[]`.
+
+**Error.** No stack trace ever reaches the user. API failures print
+`API Error <status>: <message>`; everything else prints `Error: <message>`. In
+both cases the failed user message is popped from the history, so the next prompt
+starts clean instead of resending a poisoned turn. The one error with a *route
+out* rather than just a message is context overflow, which adds: `The
+conversation no longer fits this model's context window — run /compact to
+summarize it, or /clear to start over.`
+
+That message deliberately does not say "try again". Retrying is exactly what
+cannot work, so a permanent error must not be allowed to look transient; it names
+the two commands that can.
+
+**Unauthorised.** There is no session or role to lose. The only revocable thing
+is the API key, and revoking it surfaces as an API error on the next turn with
+nothing cached to mask it. The nearest thing to a permission refusal is the
+denylist: `Error: reading <name> is not permitted (sensitive path).`, returned to
+the *model* as a tool error so it can adapt, and visible to the user as a red
+`✗`.
+
+**Slow.** Streaming means the user sees progress from the first token, so a slow
+model never looks hung. The three places that could hang are all bounded — `bash`
+at 30s, the `grep` walk at 10s wall-clock plus a 1000-match cap, and API retries
+capped at 3. A `grep` that runs out of budget appends
+`(search timed out — partial results)` rather than silently returning less.
 
 ## Every state of every surface
 
@@ -58,36 +97,6 @@ Startup is ordered so the cheapest rejections come first: parse argv → help/ve
 | **`/resume`** | — | — | `Resumed session "x" (N messages).` | `Session not found: x` in red — the current conversation is **not** cleared | Bad name → the validation error | — |
 | **`/compact`** | `Compacting conversation…` | `Nothing to compact.` | `✓ compacted N messages → 1 (~X → ~Y tokens)` | `✗ compact failed: <reason>` + `History unchanged.` | — | Chunked: a very long history makes several calls, reported as `N chunked summarization calls` |
 | **One-shot mode** | Tool activity to **stderr** so stdout stays pipeable | No prompt given → red error, exit **2** | Answer on stdout, exit **0** | Any throw → exit **1** | Destructive tools are **skipped** unless `--yes` | — |
-
-### The four states that matter
-
-**Empty.** Every list command has a real empty string rather than printing nothing.
-The first-run case — no `.mentor/` at all — is not an error anywhere: `listTurns`
-and `listSessions` both catch the missing-directory read and return `[]`.
-
-**Error.** No stack trace ever reaches the user. API failures print
-`API Error <status>: <message>`; everything else prints `Error: <message>`. In both
-cases the failed user message is popped from the history so the next prompt starts
-clean instead of resending a poisoned turn. The one error with a *route out* rather
-than just a message is context overflow, which adds:
-`The conversation no longer fits this model's context window — run /compact to
-summarize it, or /clear to start over.`
-
-**Unauthorised.** There is no session or role to lose — the only revocable thing is
-the API key, and revoking it surfaces as an API error on the next turn with nothing
-cached to mask it. The nearest thing to a permission refusal is the denylist:
-`Error: reading <name> is not permitted (sensitive path).`, returned to the *model*
-as a tool error so it can adapt, and visible to the user as a red `✗`.
-
-**Slow.** Streaming means the user sees progress from the first token, so a slow
-model never looks hung. The three places that could hang are all bounded: `bash`
-30s, the `grep` walk 10s wall-clock plus a 1000-match cap, and API retries capped
-at 3. A `grep` that runs out of budget appends
-`(search timed out — partial results)` rather than silently returning less.
-
-> **A permanent error must not look transient.** The overflow message deliberately
-> does not say "try again" — retrying is exactly what cannot work. It names the two
-> commands that can.
 
 ## Transitions
 
@@ -118,54 +127,53 @@ stateDiagram-v2
     Prompt --> Exit: /exit, /quit, Ctrl+C
 ```
 
-## Permissions per state
+## Two gates, one actor
 
-There is one actor and no roles. Two states are nonetheless gated:
+There are no roles here, and yet two states are gated.
 
-- **Approval** is the only route from a model's request to a filesystem or shell
-  change. It is bypassed only by `autoApprove`, which the banner announces in
-  yellow at startup, and which one-shot mode replaces with *skip* rather than
-  *allow* — the failure direction is closed.
-- **`/undo`** is gated by content, not identity: a change reverts only while the
-  file still hashes to the recorded post-image. The moment the user edits the file
-  themselves, their edit outranks the checkpoint and the undo is refused. This is
-  the closest thing here to "access revoked while you were on the screen", and it
-  fails closed.
+**Approval** is the only route from a model's request to a filesystem or shell
+change. It is bypassed only by `autoApprove`, which the banner announces in
+yellow at startup, and which one-shot mode replaces with *skip* rather than
+*allow* — the failure direction is closed.
 
-## Dead ends
+**`/undo`** is gated by content rather than identity: a change reverts only while
+the file still hashes to the recorded post-image. The moment the user edits the
+file themselves, their edit outranks the checkpoint and the undo is refused. This
+is the closest thing here to "access revoked while you were on the screen", and
+it fails closed.
 
-None found. Every terminal state has a stated next action:
+## No dead ends, one gap
 
-- Context overflow names `/compact` and `/clear`.
-- A failed compaction says `History unchanged; /compact to retry.`
-- A refused undo prints the diff, so the user can restore the file by hand and
-  retry — the change stays recorded rather than being dropped.
-- A missing session leaves the current conversation intact.
-- An unknown slash command says `Type /help for help.`
+Every terminal state has a stated next action. Context overflow names `/compact`
+and `/clear`. A failed compaction says `History unchanged; /compact to retry.` A
+refused undo prints the diff, so the user can restore the file by hand and retry
+— the change stays recorded rather than being dropped. A missing session leaves
+the current conversation intact. An unknown slash command says
+`Type /help for help.`
 
-The one rough edge is not a dead end but a gap: **Ctrl+C during a turn is not a
-cancel.** `src/` registers no `SIGINT` handler and the loop has no abort path
-(verified: no `SIGINT`, `abort` or `AbortController` anywhere in `src/`), so there
-is no way to stop a turn mid-flight and keep the session. The banner's `Ctrl+C to
-exit` is accurate about what it does; the v2.0.0 spec's promise of clean in-flight
-cancellation was never built. See PRD *Won't (this time)*.
+The rough edge is not a dead end but a gap: **Ctrl+C during a turn is not a
+cancel.** `src/` registers no `SIGINT` handler and the loop has no abort path —
+verified, with no `SIGINT`, `abort` or `AbortController` anywhere in `src/` — so
+there is no way to stop a turn mid-flight and keep the session. The banner's
+`Ctrl+C to exit` is accurate about what it does. The v2.0.0 spec's promise of
+clean in-flight cancellation was never built; the PRD lists it under *Won't*.
 
-## Accessibility
+## Terminal accessibility
 
-Terminal-native, so the usual web concerns do not apply, but three do:
+**Colour is never the only signal.** Every coloured element carries a glyph or a
+prefix that survives a monochrome terminal: diffs use `+`/`-`/space *and*
+green/red, results use `✓`/`✗`, risks use `⚠` and the literal word `CAUTION` or
+`DANGER`, and `(est.)` marks estimated prices in text.
 
-- **Colour is never the only signal.** Every coloured element carries a glyph or a
-  prefix that survives a monochrome terminal: diffs use `+`/`-`/space *and*
-  green/red; results use `✓`/`✗`; risks use `⚠` and the literal word
-  `CAUTION`/`DANGER`; `(est.)` marks estimated prices in text.
-- **`NO_COLOR` is honoured** — verified, not assumed:
-  `NO_COLOR=1 node dist/index.js -p hi` emits no ANSI escapes at all, while
-  `FORCE_COLOR=1` emits `^[[31m…`. chalk handles this; nothing in the code
-  overrides it.
-- **Screen readers and pipes** get a coherent stream because one-shot mode splits
-  channels: assistant text on stdout, tool activity on stderr. `terminal-agent -p
-  "…" > answer.txt` yields the answer and nothing else.
+**`NO_COLOR` is honoured** — verified rather than assumed.
+`NO_COLOR=1 node dist/index.js -p hi` emits no ANSI escapes at all, while
+`FORCE_COLOR=1` emits `^[[31m…`. chalk handles this and nothing in the code
+overrides it.
+
+**Screen readers and pipes** get a coherent stream, because one-shot mode splits
+channels: assistant text on stdout, tool activity on stderr. So
+`terminal-agent -p "…" > answer.txt` yields the answer and nothing else.
 
 The context meter is ASCII (`[####----------] 42%`) rather than block-drawing
-characters, and always prints the percentage as text beside the bar, so the bar is
-decoration rather than the only carrier of the number.
+characters, and always prints the percentage as text beside the bar, so the bar
+is decoration rather than the only carrier of the number.

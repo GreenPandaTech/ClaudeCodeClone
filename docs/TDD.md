@@ -1,31 +1,29 @@
-# TDD — TerminalAgent
+# TerminalAgent — technical design
 
-**Status:** built (retrospective, v2.2.0) · **Date:** 2026-08-03
-**PRD:** [PRD.md](PRD.md) · **Repo:** `GreenPandaTech/TerminalAgent`
+v2.2.0, derived by reading `src/` rather than the README. Where the two
+disagreed the code won and the README was corrected in the same pass.
+Requirements: [PRD.md](PRD.md).
 
-> Derived by reading `src/`, not the README. Where the two disagree the code wins
-> and the README has been corrected in the same pass.
+## Two seams do all the work
 
-## Approach
+`src/index.ts` (797 lines) is the only impure module. It owns the readline REPL,
+the slash commands, the chalk output, `process.exit`, and the real Anthropic
+client. Everything else is either a pure function or is driven through an
+injected seam.
 
-One impure shell around a set of pure modules. `src/index.ts` (797 lines) owns
-everything that touches the world — the readline REPL, slash commands, chalk
-output, `process.exit`, the real Anthropic client — and everything else is either
-a pure function or is driven through an injected seam. The agentic loop lives in
-`src/agent.ts` and never constructs a client, never prints, and never asks a
-question: it receives an `AgentContext` carrying an `LlmClient`, an `AgentIO`, and
-an `execute` function. That is why 205 tests can cover the loop, the tools, the
-classifier, checkpoints, sessions, pricing, context accounting and compaction
-without a network call or an API key.
+The agentic loop in `src/agent.ts` never constructs a client, never prints, and
+never asks a question. It receives an `AgentContext` carrying an `LlmClient`, an
+`AgentIO` and an `execute` function — which is why 205 tests can cover the loop,
+the tools, the classifier, checkpoints, sessions, pricing, context accounting and
+compaction without a single network call or an API key.
 
-Two seams do all the work:
+**`LlmClient`** is a three-field interface over `client.messages.stream(...)`.
+The real SDK stream is structurally assignable to it; tests pass a scripted fake.
 
-- **`LlmClient`** — a three-field interface over `client.messages.stream(...)`.
-  The real SDK stream is structurally assignable to it; tests pass a scripted fake.
-- **`execute`** — `(name, input) => Promise<ToolResult>`. `withCheckpoints()`
-  wraps it, so checkpointing is a decorator on the same seam rather than a branch
-  inside the loop. The loop only ever hands `execute` *approved* calls, which is
-  what makes "checkpoint everything that reaches execute" correct.
+**`execute`** is `(name, input) => Promise<ToolResult>`. `withCheckpoints()`
+wraps it, so checkpointing is a decorator on the same seam rather than a branch
+inside the loop. The loop only ever hands `execute` *approved* calls, which is
+what makes "checkpoint everything that reaches execute" correct.
 
 ```
 index.ts (impure shell)
@@ -44,12 +42,41 @@ index.ts (impure shell)
   └─ version.ts    VERSION, pinned to package.json + README by a test
 ```
 
-## Data model
+## What is a boundary, and what only looks like one
 
-No database. Three on-disk artefacts, all local to the working directory, all
-schema-versioned and parsed fail-loud.
+There is no access control, and that is the design: a single-user local process,
+no accounts, no server, no database, no RLS, no `anon` role, nothing granted to
+anyone. The process runs with the invoking user's own permissions and can reach
+anything that user can reach.
 
-**`.mentor/checkpoints/turn-NNNNNN.json`** — `{ version: 1, turn: number, changes: FileChange[] }`
+Six things stand in its place, and they are not equally strong.
+
+| Control | Enforces | Is it a boundary? |
+|---|---|---|
+| Confirmation gate on `bash` / `write_file` / `edit_file` | Nothing runs without an explicit `y` | **Yes** — the loop cannot reach `execute` for these tools without it, unless auto-approve is on |
+| Sensitive-path denylist | Credential files are not read, written, edited, grepped, or shown in a write preview | Partly — deny-by-shape, so an unusual credential filename is not covered. It can only grow (config adds, never removes) |
+| Command classifier | Louder warning on irreversible / fetch-and-execute commands | **No.** Heuristic. It never blocks; the README and the module header both say so |
+| ReDoS guard | `grep` patterns > 500 chars and four catastrophic-backtracking shapes rejected; 10s wall-clock budget; 1000-match cap | Yes, for the denial-of-service it targets |
+| `.mentor/.gitignore` = `*` | Transcripts and snapshots stay out of git | Yes, unless someone force-adds |
+| Session name regex | No path traversal via `/save ../../x` | Yes |
+
+The one credential in existence is `ANTHROPIC_API_KEY`, read from the environment
+or a gitignored `.env`. It is never persisted to a session, a checkpoint or a
+log. Revoking it in the console is the only revocation there is, and it takes
+effect on the next API call, because nothing is cached.
+
+Auto-approve is the one control that can be switched off, and it is loud about
+it: the banner prints `AUTO-APPROVE is ON — destructive actions run without
+confirmation` in yellow at startup. One-shot print mode has no interactive
+approval at all, so destructive tools are simply skipped there unless `--yes` is
+passed — which fails closed.
+
+## On-disk artefacts
+
+No database. Three local files, all schema-versioned, all parsed fail-loud.
+
+**`.mentor/checkpoints/turn-NNNNNN.json`** —
+`{ version: 1, turn: number, changes: FileChange[] }`
 
 | Field | Type | Notes |
 |---|---|---|
@@ -60,37 +87,38 @@ schema-versioned and parsed fail-loud.
 | `afterHash` | string | sha256 hex of what the tool left on disk — the entire safety mechanism of `/undo` |
 
 Turn ids are allocated as `max(existing) + 1`, so a restart never collides with a
-previous session's store. Files with zero changes are filtered out of `listTurns`.
-Pruning keeps the newest `checkpointTurns` (default 20) turns.
+previous session's store. Files with zero changes are filtered out of
+`listTurns`, and pruning keeps the newest `checkpointTurns` turns, 20 by default.
 
 **`.mentor/sessions/<name>.json`** — `{ version: 1, name, model, messages }`. The
-name must match `^[A-Za-z0-9._-]+$` and is rejected if `.` or `..`, so a session
-name can never escape the directory.
+name must match `^[A-Za-z0-9._-]+$` and is rejected if it is `.` or `..`, so a
+session name can never escape the directory.
 
 **`.mentor/.gitignore`** — written as `*` the first time either store is created,
-by both `session.ts` and `checkpoints.ts` independently. Transcripts and file
+independently by both `session.ts` and `checkpoints.ts`. Transcripts and file
 snapshots cannot reach a commit by accident.
 
-**Legacy rows.** Neither store has ever had a schema change, so there are no
-null-on-old-rows columns. The version field exists precisely so the first change
-fails loud: `parseTurnCheckpoint` and `parseSession` throw on any version other
-than `1` rather than half-loading. A `.mentor/` directory written by a newer build
-is refused by an older one, which is the correct direction for a rollback.
+There are no migrations and no migrations table, and neither store has ever had a
+schema change, so there are no null-on-old-rows columns either. The version field
+exists precisely so the first change fails loud: `parseTurnCheckpoint` and
+`parseSession` throw on any version other than `1` rather than half-loading. A
+`.mentor/` directory written by a newer build is refused by an older one, which is
+the correct direction for a rollback.
 
-**Configuration** resolves in three layers, increasing precedence:
-built-in `DEFAULT_CONFIG` → `.mentorrc.json` in cwd → environment (`MODEL`,
+Configuration resolves in three layers of increasing precedence: built-in
+`DEFAULT_CONFIG`, then `.mentorrc.json` in cwd, then the environment (`MODEL`,
 `MAX_TOKENS`, `AUTO_APPROVE`). Every key is type-checked on the way in and throws
-a named error; a malformed config exits 1 at startup rather than being ignored.
-`AUTO_APPROVE` is honoured in **both** directions when explicitly set, so a user
-can re-enable the confirmation gate over a config file that turned it off — an
-unset or empty value leaves the file's value alone.
+a named error, so a malformed config exits 1 at startup rather than being
+ignored. `AUTO_APPROVE` is honoured in **both** directions when explicitly set,
+so a user can re-enable the confirmation gate over a config file that turned it
+off; unset or empty leaves the file's value alone.
 
 > **NAMING.** `.mentorrc.json`, `MENTOR.md` and `.mentor/` predate the 2026-08
 > rename from Mentor and are deliberately unchanged. They are a data contract:
 > renaming them orphans every existing config, memory file, session and checkpoint
 > store on disk. A rename belongs in a major version that reads the old names
-> first. Everything that is only a name — package, command, banner, system prompt —
-> has moved.
+> first. Everything that is only a name — package, command, banner, system prompt
+> — has moved.
 
 ## Interfaces
 
@@ -121,62 +149,30 @@ isContextOverflowError(err): boolean
 compactHistory(messages, deps): Promise<CompactResult | null>  // throws => history untouched
 ```
 
-**Contracts worth stating explicitly:**
+Four contracts a caller could get wrong.
 
-- `executeTool` **returns errors, it does not throw them**. Every tool wraps its own
-  body in `try/catch` and reports `{ output, isError: true }`, and an unknown tool
-  name returns `Unknown tool: <name>` the same way — so a tool failure is fed back
-  to the model as a `tool_result` and the loop continues instead of the REPL dying.
-  The one unguarded line is `askUser`'s `readline.createInterface` call; a throw
-  there would propagate, which is untested and worth closing.
-- `classifyCommand` can only ever *raise* a rating. It unwraps `cmd /c` /
-  `powershell -Command` prefixes stage by stage (capped at 8), classifies every
-  intermediate string *and* every `&&`/`;`/`|`-separated segment, and keeps the
-  worst. Adding an unwrap stage is therefore strictly additive — it can surface a
-  threat, never hide one. The deliberate cost is a false banner when a separator
-  appears inside a quoted argument such as a commit message.
-- `withCheckpoints` snapshots the pre-image **before** calling `inner`, and records
-  nothing when `inner` returns `isError`. If the pre-image could not be read for
-  any reason other than "file does not exist", the write still happens but the
-  result string is appended with an explicit warning that `/undo` will not cover
-  it. It never fails the tool call to protect its own bookkeeping.
-- `compactHistory` mutates `messages` only after the final non-empty summary has
-  been received. Every failure path leaves the history byte-identical.
+`executeTool` **returns errors, it does not throw them.** Every tool wraps its own
+body in `try/catch` and reports `{ output, isError: true }`, and an unknown tool
+name returns `Unknown tool: <name>` the same way — so a tool failure is fed back
+to the model as a `tool_result` and the loop continues instead of the REPL dying.
+The one unguarded line is `askUser`'s `readline.createInterface` call; a throw
+there would propagate, which is untested and worth closing.
 
-## Access control
+`classifyCommand` can only ever *raise* a rating. It unwraps `cmd /c` and
+`powershell -Command` prefixes stage by stage, capped at eight, classifies every
+intermediate string *and* every `&&`/`;`/`|`-separated segment, and keeps the
+worst. Adding an unwrap stage is therefore strictly additive: it can surface a
+threat, never hide one. The deliberate cost is a false banner when a separator
+appears inside a quoted argument, such as a commit message.
 
-**There is none, and that is the design.** Single-user local process, no accounts,
-no server, no database, no RLS, no `anon` role, nothing granted to anyone. The
-process runs with the invoking user's own permissions and can reach anything that
-user can reach.
+`withCheckpoints` snapshots the pre-image **before** calling `inner`, and records
+nothing when `inner` returns `isError`. If the pre-image could not be read for
+any reason other than "file does not exist", the write still happens and the
+result string is appended with an explicit warning that `/undo` will not cover
+it. It never fails the tool call to protect its own bookkeeping.
 
-What stands in its place, and what each thing is actually worth:
-
-| Control | Enforces | Is it a boundary? |
-|---|---|---|
-| Confirmation gate on `bash` / `write_file` / `edit_file` | Nothing runs without an explicit `y` | **Yes** — the loop cannot reach `execute` for these tools without it, unless auto-approve is on |
-| Sensitive-path denylist | Credential files are not read, written, edited, grepped, or shown in a write preview | Partly — deny-by-shape, so an unusual credential filename is not covered. It can only grow (config adds, never removes) |
-| Command classifier | Louder warning on irreversible / fetch-and-execute commands | **No.** Heuristic. It never blocks; the README and the module header both say so |
-| ReDoS guard | `grep` patterns > 500 chars and four catastrophic-backtracking shapes rejected; 10s wall-clock budget; 1000-match cap | Yes, for the denial-of-service it targets |
-| `.mentor/.gitignore` = `*` | Transcripts and snapshots stay out of git | Yes, unless someone force-adds |
-| Session name regex | No path traversal via `/save ../../x` | Yes |
-
-The one credential that exists is `ANTHROPIC_API_KEY`, read from the environment or
-a gitignored `.env`. It is never persisted to a session, a checkpoint or a log.
-Revoking it in the console is the only revocation there is, and it takes effect on
-the next API call because nothing is cached.
-
-**Auto-approve is the one control that can be switched off**, and it is loud about
-it: the banner prints `AUTO-APPROVE is ON — destructive actions run without
-confirmation` in yellow at startup. One-shot print mode has no interactive
-approval at all — destructive tools are simply skipped unless `--yes` is passed,
-which fails closed.
-
-## Migrations
-
-None. No database, no migrations table. The equivalent risk lives in the two JSON
-schema versions above, and the discipline is the same: a version bump is a new
-number, old files are refused loudly, and nothing is edited in place.
+`compactHistory` mutates `messages` only after the final non-empty summary has
+arrived. Every failure path leaves the history byte-identical.
 
 ## Failure modes
 
@@ -193,99 +189,93 @@ number, old files are refused loudly, and nothing is edited in place.
 | `bash` command exceeds 30s | User, as a tool error | `execSync` timeout | Command is killed; stdout+stderr are returned to the model as `isError` |
 | `grep` exceeds its 10s budget | User, in the output | Deadline check in the walker | Partial results returned with `(search timed out — partial results)` appended |
 | Turn ids collide across directories after `/cwd` | Would show another directory's turns in `/changes` | `sessionTurns(dir)` scopes the id list to the directory it was allocated in | Already handled |
-| **Two prompts submitted while a turn is in flight** | Rarely, as a confusing history or an API 400 | **Not detected.** `rl.on("line", async …)` is not awaited by readline and nothing pauses input, so a second `runAgenticLoop` can run concurrently on the same `messages` array | Not handled — see PRD *Won't*. Recorded, not fixed |
+| **Two prompts submitted while a turn is in flight** | Rarely, as a confusing history or an API 400 | **Not detected.** `rl.on("line", async …)` is not awaited by readline and nothing pauses input, so a second `runAgenticLoop` can run concurrently on the same `messages` array | Not handled — see the PRD's *Won't*. Recorded, not fixed |
 | **`ask_user` opens a second readline on the same stdin** | Rarely, as a swallowed or misrouted keystroke | Not detected. `tools.ts:askUser` creates its own interface while the REPL's is still open | Not handled. Recorded, not fixed |
+
+The last two rows stay open on purpose. Serialising `rl.on("line")` is a
+behaviour change: it needs its own PRD entry, a failing test first, and a
+decision on what happens to input typed mid-turn — queue it, or discard it with a
+message. `ask_user` competing for stdin wants the same treatment, by passing the
+existing interface in rather than opening a second one.
 
 ## Rollback
 
-There is nothing deployed, so rollback is `git revert <sha> && npm run build`,
-which takes about ten seconds. There is no server to drain, no schema to migrate
-back, and no user data shape that changes.
+Nothing is deployed, so rollback is `git revert <sha> && npm run build`, about
+ten seconds. No server to drain, no schema to migrate back, no user data shape
+that changes.
 
-The one thing a rollback can strand is on-disk state written by a newer build. Both
-stores are version-gated: an older build reading a `version: 2` checkpoint or
-session throws `Unsupported checkpoint version: 2 (expected 1)` and refuses, rather
-than parsing it partially. That is the correct failure — a stranded store is
-recovered by deleting `.mentor/` (losing undo history and saved sessions, never
-source files, since checkpoints only ever *hold* copies).
+The one thing a rollback can strand is on-disk state written by a newer build.
+Both stores are version-gated: an older build reading a `version: 2` checkpoint
+or session throws `Unsupported checkpoint version: 2 (expected 1)` and refuses
+rather than parsing it partially. That is the correct failure. A stranded store
+is recovered by deleting `.mentor/`, which loses undo history and saved sessions
+but never source files, since checkpoints only ever *hold* copies.
 
-**Irreversible by nature:** anything an approved `bash` command did. No checkpoint
-covers it, and no rollback of this repo brings it back. That is accepted because
-sandboxing `bash` would remove the tool's reason to exist — the mitigation is the
+Irreversible by nature: anything an approved `bash` command did. No checkpoint
+covers it, and no rollback of this repo brings it back. Accepted, because
+sandboxing `bash` would remove the tool's reason to exist. The mitigation is the
 approval gate plus the classifier banner, and the limitation is stated in the
 README rather than glossed.
 
 ## Test plan
 
-205 tests, `node --test` over the compiled `dist/**/*.test.js`, in CI on every push
-alongside `tsc` and `eslint`. None touches the network.
+205 tests, `node --test` over the compiled `dist/**/*.test.js`, run in CI on
+every push alongside `tsc` and `eslint`. None touches the network.
 
-**Positive — legitimate use still works**
-- Agentic loop: single-turn text, multi-turn tool execution, approval runs the
-  tool, per-turn usage reported, correct stop-reason termination (fake `LlmClient`).
-- `/undo` restores an intact file; `/undo turn` walks a file changed twice in one
-  turn back to its original content.
-- Config: file read, env override, `AUTO_APPROVE` re-enabling the gate over a
-  config that disabled it.
-- `taskkill /f /im node.exe` and `echo del /s /q is dangerous` both rate `normal` —
-  proof the classifier did not over-fire.
+**Positive — legitimate use still works.** Agentic loop: single-turn text,
+multi-turn tool execution, approval running the tool, per-turn usage reported,
+correct stop-reason termination, all against a fake `LlmClient`. `/undo` restores
+an intact file, and `/undo turn` walks a file changed twice in one turn back to
+its original content. Config: file read, env override, and `AUTO_APPROVE`
+re-enabling the gate over a config that disabled it. And two proofs the
+classifier does not over-fire — `taskkill /f /im node.exe` and
+`echo del /s /q is dangerous` both rate `normal`.
 
-**Negative — the thing we prevent is prevented**
-- Denial of a destructive tool feeds `is_error` back to the model and the file is
-  untouched.
-- `write_file` / `edit_file` / `read_file` refuse sensitive paths, including
-  symlinked and case-variant ones; the `grep` walker skips them; `readForPreview`
-  returns `""` so an overwritten credential file's contents never reach the terminal.
-- `/undo` refuses a file edited since (`refused[0].reason` matches `/edited/i`) and
-  leaves it byte-identical.
-- Chained commands: the rating comes from the worst segment, not the first —
-  `rm build/tmp && rm -rf ~` and `del temp.txt & del /s /q C:\` both rate on their
-  dangerous half. This is a regression test for a real defect where the mitigation
-  the user relies on was the thing that failed.
-- `safeRegExp` rejects over-long and catastrophic patterns.
+**Negative — the thing we prevent is prevented.** Denial of a destructive tool
+feeds `is_error` back to the model and the file is untouched. `write_file`,
+`edit_file` and `read_file` refuse sensitive paths including symlinked and
+case-variant ones; the `grep` walker skips them; `readForPreview` returns `""` so
+an overwritten credential file's contents never reach the terminal. `/undo`
+refuses a file edited since — `refused[0].reason` matches `/edited/i` — and
+leaves it byte-identical. Chained commands take their rating from the worst
+segment rather than the first: `rm build/tmp && rm -rf ~` and
+`del temp.txt & del /s /q C:\` both rate on their dangerous half, which is a
+regression test for a real defect where the mitigation the user relies on was the
+thing that failed. And `safeRegExp` rejects over-long and catastrophic patterns.
 
-**Boundary — the cases that reach production**
-- `hostile.test.ts`: malformed JSON, wrong schema version, unserialisable content
-  blocks, non-finite usage numbers — every one fails loud rather than computing a
-  confidently wrong result.
-- `formatPercent`: a tiny nonzero fraction renders `<1%`, not `0%`; just under full
-  renders `>99%`, not `100%`.
-- `analyzeContext`: measured `0` is treated as "nothing measured" so an offline
-  harness's all-zero usage cannot suppress the estimate; `autoCompactAt` is floored
-  at 1 so a tiny threshold cannot fire on an empty session.
-- `countCacheBreakpoints` pins exactly one breakpoint after any number of turns,
-  including on a history restored from disk.
-- `version.test.ts` pins `VERSION` == `package.json` == a `vX.Y.Z` string in the
-  README, so a release cannot ship three different version numbers.
-- `identity.test.ts` is an honesty tripwire: it asserts the system prompt says
-  `You are TerminalAgent` and *not* `You are Claude Code`, and that the speaker
-  label is not `Claude:`. It fails if a future edit makes the product lie about
-  what it is.
+**Boundary — the cases that reach production.** `hostile.test.ts` covers
+malformed JSON, wrong schema version, unserialisable content blocks and
+non-finite usage numbers, each failing loud rather than computing a confidently
+wrong result. `formatPercent` renders a tiny nonzero fraction as `<1%` rather
+than `0%`, and just-under-full as `>99%` rather than `100%`. `analyzeContext`
+treats a measured `0` as "nothing measured", so an offline harness's all-zero
+usage cannot suppress the estimate, and floors `autoCompactAt` at 1 so a tiny
+threshold cannot fire on an empty session. `countCacheBreakpoints` pins exactly
+one breakpoint after any number of turns, including on a history restored from
+disk. `version.test.ts` pins `VERSION` equal to `package.json` and to a `vX.Y.Z`
+string in the README, so a release cannot ship three different version numbers.
+And `identity.test.ts` is an honesty tripwire: it asserts the system prompt says
+`You are TerminalAgent` and *not* `You are Claude Code`, and that the speaker
+label is not `Claude:`. It fails if a future edit makes the product lie about
+what it is.
 
-**Not covered by tests:** the interactive glue in `src/index.ts` — readline wiring,
-slash-command dispatch, chalk formatting. It is exercised by
+**Not covered by tests:** the interactive glue in `src/index.ts` — readline
+wiring, slash-command dispatch, chalk formatting. It is exercised by
 `examples/capture-transcript.mjs`, which drives the **real built binary** end to
-end against a local replay of the Messages API on `127.0.0.1` (the SDK honours
-`ANTHROPIC_BASE_URL`), so the SDK parser, loop, gate, tools, checkpoint store and
-slash commands are all the production path with no key and nothing leaving the
-machine. That is coverage of a happy path, not a substitute for unit tests, and the
-two concurrency defects above are exactly what it does not reach.
+end against a local replay of the Messages API on `127.0.0.1`, since the SDK
+honours `ANTHROPIC_BASE_URL`. The SDK parser, loop, gate, tools, checkpoint store
+and slash commands are therefore all the production path, with no key and nothing
+leaving the machine. That is coverage of a happy path rather than a substitute
+for unit tests, and the two concurrency defects above are exactly what it does
+not reach.
 
 ## Build order
 
-Historical, as shipped: tooling and the version seam → the injected agentic core
-(the keystone; everything after it is testable) → diff preview and command
-classifier → project memory, config and honest identity → print mode → session
-persistence → per-model pricing and `/model` → retry with injected sleep → docs and
-a hostile-input sweep. v2.1.0 added checkpoints and the Windows classifier rules;
-v2.2.0 added context accounting and compaction. The order is not arbitrary: the DI
-seam came third because nothing downstream of it could be tested until it existed.
+As shipped: tooling and the version seam → the injected agentic core → diff
+preview and command classifier → project memory, config and honest identity →
+print mode → session persistence → per-model pricing and `/model` → retry with
+injected sleep → docs and a hostile-input sweep. v2.1.0 added checkpoints and the
+Windows classifier rules; v2.2.0 added context accounting and compaction.
 
-## Open questions
-
-- The two concurrency defects are recorded here, unfixed. Serialising `rl.on("line")`
-  is a behaviour change and needs its own PRD entry, a failing test first, and a
-  decision on what should happen to input typed mid-turn (queue it, or discard it
-  with a message).
-- `ask_user` competing for stdin with the REPL's own readline wants the same
-  treatment: pass the existing interface in rather than opening a second one.
+The order was not arbitrary. The DI seam came third because nothing downstream of
+it could be tested until it existed.
