@@ -4,7 +4,7 @@ v2.2.0, derived by reading `src/` rather than the README. Where the two
 disagreed the code won and the README was corrected in the same pass.
 Requirements: [PRD.md](PRD.md).
 
-## Two seams do all the work
+## Everything impure lives in one file
 
 `src/index.ts` (797 lines) is the only impure module. It owns the readline REPL,
 the slash commands, the chalk output, `process.exit`, and the real Anthropic
@@ -174,7 +174,7 @@ it. It never fails the tool call to protect its own bookkeeping.
 `compactHistory` mutates `messages` only after the final non-empty summary has
 arrived. Every failure path leaves the history byte-identical.
 
-## Failure modes
+## What breaks, and how far the undo reaches
 
 | What breaks | Who notices | How we detect it | How we undo it |
 |---|---|---|---|
@@ -189,7 +189,7 @@ arrived. Every failure path leaves the history byte-identical.
 | `bash` command exceeds 30s | User, as a tool error | `execSync` timeout | Command is killed; stdout+stderr are returned to the model as `isError` |
 | `grep` exceeds its 10s budget | User, in the output | Deadline check in the walker | Partial results returned with `(search timed out — partial results)` appended |
 | Turn ids collide across directories after `/cwd` | Would show another directory's turns in `/changes` | `sessionTurns(dir)` scopes the id list to the directory it was allocated in | Already handled |
-| **Two prompts submitted while a turn is in flight** | Rarely, as a confusing history or an API 400 | **Not detected.** `rl.on("line", async …)` is not awaited by readline and nothing pauses input, so a second `runAgenticLoop` can run concurrently on the same `messages` array | Not handled — see the PRD's *Won't*. Recorded, not fixed |
+| **Two prompts submitted while a turn is in flight** | Rarely, as a confusing history or an API 400 | **Not detected.** `rl.on("line", async …)` is not awaited by readline and nothing pauses input, so a second `runAgenticLoop` can run concurrently on the same `messages` array | Not handled — see the PRD's out-of-scope section. Recorded, not fixed |
 | **`ask_user` opens a second readline on the same stdin** | Rarely, as a swallowed or misrouted keystroke | Not detected. `tools.ts:askUser` creates its own interface while the REPL's is still open | Not handled. Recorded, not fixed |
 
 The last two rows stay open on purpose. Serialising `rl.on("line")` is a
@@ -198,11 +198,9 @@ decision on what happens to input typed mid-turn — queue it, or discard it wit
 message. `ask_user` competing for stdin wants the same treatment, by passing the
 existing interface in rather than opening a second one.
 
-## Rollback
-
-Nothing is deployed, so rollback is `git revert <sha> && npm run build`, about
-ten seconds. No server to drain, no schema to migrate back, no user data shape
-that changes.
+Rolling the whole build back is the cheapest undo of all. Nothing is deployed,
+so it is `git revert <sha> && npm run build`, about ten seconds: no server to
+drain, no schema to migrate back, no user data shape that changes.
 
 The one thing a rollback can strand is on-disk state written by a newer build.
 Both stores are version-gated: an older build reading a `version: 2` checkpoint
@@ -217,7 +215,7 @@ sandboxing `bash` would remove the tool's reason to exist. The mitigation is the
 approval gate plus the classifier banner, and the limitation is stated in the
 README rather than glossed.
 
-## Test plan
+## What 205 tests without a network call can cover
 
 205 tests, `node --test` over the compiled `dist/**/*.test.js`, run in CI on
 every push alongside `tsc` and `eslint`. None touches the network.
@@ -269,7 +267,7 @@ leaving the machine. That is coverage of a happy path rather than a substitute
 for unit tests, and the two concurrency defects above are exactly what it does
 not reach.
 
-## Build order
+## The order it shipped in, and why it was not arbitrary
 
 As shipped: tooling and the version seam → the injected agentic core → diff
 preview and command classifier → project memory, config and honest identity →

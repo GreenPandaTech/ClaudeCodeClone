@@ -56,15 +56,6 @@ the gate here is the human.
   stderr.
 - Context accounting and automatic compaction.
 
-**Won't, this time**
-
-- Cancelling an in-flight turn with Ctrl+C. The v2.0.0 spec listed it, it was
-  never built, and `src/` contains no `SIGINT` or `AbortController` handling.
-  Ctrl+C closes the REPL and exits the process. Written down here so it is not
-  mistaken for a shipped feature.
-- Serialising REPL input. Nothing stops a second prompt being submitted while a
-  turn is in flight; see the TDD's failure modes.
-
 ## The claims, and how to check them
 
 - [x] No file is written or overwritten without the exact diff being shown first
@@ -99,7 +90,15 @@ audience is why the transcript and the classifier table in the README are
 generated from the real code by scripts in `examples/`, and can be reproduced
 with no API key.
 
-## Also out
+## What is out, including two things the spec once promised
+
+**Cancelling an in-flight turn with Ctrl+C.** The v2.0.0 spec listed it, it was
+never built, and `src/` contains no `SIGINT` or `AbortController` handling.
+Ctrl+C closes the REPL and exits the process. Written down here so it is not
+mistaken for a shipped feature.
+
+**Serialising REPL input.** Nothing stops a second prompt being submitted while
+a turn is in flight; see the TDD's failure modes.
 
 **Multi-user, a server, a web UI, MCP.** Single-user terminal REPL plus one-shot
 mode. Sessions persist to local disk, and nothing is uploaded anywhere except the
@@ -147,9 +146,9 @@ rules and by the list only being able to grow. `/undo` clobbers work done outsid
 the tool — prevented outright by the post-image hash check, which refuses rather
 than guesses.
 
-## Rejected
+## Decisions that went the other way
 
-| Considered | Rejected because |
+| Considered | The reason against |
 |---|---|
 | A real tokenizer for `/context` | A dependency and a startup cost for a number that is decorative once a turn has run — the API reports authoritative usage. The ~4 chars/token heuristic is used only before the first call and is always labelled an estimate. Being visibly approximate beats being confidently wrong. |
 | Compaction that keeps the last N turns verbatim | Would split `tool_use`/`tool_result` pairs and produce a history the API rejects. The whole history is summarised into one message instead — worse fidelity, but it cannot generate an invalid request. |
@@ -157,7 +156,7 @@ than guesses.
 | Blocking `danger`-rated commands outright | See the second section. The gate is the human; the classifier's job is to make the human look. |
 | Renaming `.mentorrc.json` / `MENTOR.md` / `.mentor/` during the 2026-08 rename | Those are a data contract, not a label. Renaming them silently orphans every existing config file, memory file, saved session and checkpoint store in every directory the tool has ever run in. Deferred to a major release that reads the old names first. |
 
-## Two undecided things
+## Questions left standing
 
 Should a `bash` command rated `danger` require typing the command back rather
 than `y`? It would break the "the classifier never blocks" line, and a single `y`
