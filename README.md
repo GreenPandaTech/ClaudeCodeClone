@@ -1,6 +1,6 @@
 # TerminalAgent - a terminal AI coding assistant on the Anthropic API
 
-[![CI](https://github.com/GreenPandaTech/TerminalAgent/actions/workflows/ci.yml/badge.svg)](https://github.com/GreenPandaTech/TerminalAgent/actions/workflows/ci.yml)
+[![CI](https://github.com/Leo-Y-Zhang/TerminalAgent/actions/workflows/ci.yml/badge.svg)](https://github.com/Leo-Y-Zhang/TerminalAgent/actions/workflows/ci.yml)
 ![version](https://img.shields.io/badge/version-v2.2.0-blue)
 ![node](https://img.shields.io/badge/node-22%2B-green)
 
@@ -290,4 +290,4 @@ examples/
 
 ## License
 
-Proprietary - All Rights Reserved (c) 2026 GreenPandaTech - portfolio viewing only.
+Proprietary - All Rights Reserved (c) 2026 Leo-Y-Zhang - portfolio viewing only.
