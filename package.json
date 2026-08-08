@@ -1,6 +1,7 @@
 {
   "name": "terminal-agent",
   "version": "2.2.0",
+  "author": "Leo Y. Zhang",
   "description": "A local Claude Code style AI coding assistant CLI powered by the Anthropic API",
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",
