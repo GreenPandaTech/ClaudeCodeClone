@@ -74,7 +74,7 @@ the gate here is the human.
       the window is going, and compaction recovers a session that has already
       overflowed the model entirely.
 - [x] The safety-critical logic is covered by tests that never touch the network
-      — 205 of them at v2.2.0, run in CI on every push.
+      — 212 of them at v2.2.0, run in CI on every push.
 
 ## One user
 
