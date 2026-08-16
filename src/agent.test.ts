@@ -4,6 +4,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import {
   runAgenticLoop,
   runOnce,
+  rollbackFailedTurn,
   type LlmClient,
   type LlmStream,
   type AgentContext,
@@ -396,4 +397,90 @@ test("retries are bounded and the error propagates once exhausted", async () => 
 
   await assert.rejects(runAgenticLoop([{ role: "user", content: "go" }], ctx));
   assert.equal(client.attempts, 3); // initial + 2 retries
+});
+
+// ─── Rollback after a failed turn ────────────────────────────────────────────
+// The REPL recovers from a failed turn by rolling the history back so the user
+// can retype. Getting that wrong is not cosmetic: the Messages API requires
+// every assistant tool_use to be answered by a tool_result in the very next
+// message, so a rollback that stops one message short leaves a history that is
+// rejected on every subsequent send.
+
+/** Does any assistant tool_use in this history lack its answering tool_result? */
+function hasUnansweredToolUse(messages: Message[]): boolean {
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+    const ids = msg.content.filter((b) => b.type === "tool_use").map((b) => b.id);
+    if (ids.length === 0) continue;
+    const next = messages[i + 1];
+    const answered =
+      next !== undefined && next.role === "user" && Array.isArray(next.content)
+        ? next.content.filter((b) => b.type === "tool_result").map((b) => b.tool_use_id)
+        : [];
+    if (ids.some((id) => !answered.includes(id))) return true;
+  }
+  return false;
+}
+
+test("rollbackFailedTurn drops a whole failed turn, not just its last message", async () => {
+  // Turn 1 asks for a tool; the tool runs; turn 2 fails outright (a 400 is not
+  // retriable), which is exactly when the REPL rolls back.
+  const good = new FakeLlmClient([
+    { text: "editing", toolUses: [{ id: "t1", name: "write_file", input: { file_path: "a.ts", content: "x" } }] },
+  ]);
+  let calls = 0;
+  const client: LlmClient = {
+    stream: (p) => {
+      if (++calls === 2) {
+        const err = new Error("http 400") as Error & { status: number };
+        err.status = 400;
+        throw err;
+      }
+      return good.stream(p);
+    },
+  };
+  const { ctx } = makeHarness(client, { autoApprove: true });
+
+  const messages: Message[] = [
+    { role: "user", content: "an earlier prompt" },
+    { role: "assistant", content: [{ type: "text", text: "an earlier reply" }] },
+    { role: "user", content: "edit a.ts" },
+  ];
+  await assert.rejects(runAgenticLoop(messages, ctx));
+  // The loop left the tool_use/tool_result pair in place; the failure came after.
+  assert.equal(messages.length, 5);
+
+  rollbackFailedTurn(messages);
+
+  assert.equal(hasUnansweredToolUse(messages), false);
+  // Back to the completed conversation: the failed prompt is gone too, so the
+  // user can retype it without stacking two user messages in a row.
+  assert.equal(messages.length, 2);
+  assert.equal(messages[1].role, "assistant");
+});
+
+test("rollbackFailedTurn drops the prompt when the very first call fails", () => {
+  const messages: Message[] = [
+    { role: "user", content: "an earlier prompt" },
+    { role: "assistant", content: [{ type: "text", text: "an earlier reply" }] },
+    { role: "user", content: "the prompt that failed" },
+  ];
+
+  rollbackFailedTurn(messages);
+
+  assert.equal(messages.length, 2);
+  assert.equal(messages[1].role, "assistant");
+});
+
+test("rollbackFailedTurn empties a history whose only turn failed", () => {
+  const messages: Message[] = [{ role: "user", content: "the only prompt" }];
+  rollbackFailedTurn(messages);
+  assert.deepEqual(messages, []);
+});
+
+test("rollbackFailedTurn on an empty history is a no-op", () => {
+  const messages: Message[] = [];
+  rollbackFailedTurn(messages);
+  assert.deepEqual(messages, []);
 });

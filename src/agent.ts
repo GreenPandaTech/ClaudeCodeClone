@@ -190,6 +190,43 @@ export async function runAgenticLoop(messages: Message[], ctx: AgentContext): Pr
   }
 }
 
+// ─── Recovery from a failed turn ──────────────────────────────────────────────
+
+function hasBlockOfType(msg: Message, type: string): boolean {
+  return (
+    Array.isArray(msg.content) &&
+    msg.content.some((b) => b !== null && typeof b === "object" && (b as { type?: unknown }).type === type)
+  );
+}
+
+/**
+ * Roll the conversation back to the state before the turn that just failed, so
+ * the user can retype their prompt against a history the API will still accept.
+ *
+ * A turn is not one message. runAgenticLoop appends an assistant message per
+ * model call and a user message of tool_results per tool round, so a failure on
+ * the second or later call leaves several messages behind — and the Messages
+ * API requires every assistant `tool_use` to be answered by a `tool_result` in
+ * the very next message. Dropping only the last message therefore left the
+ * history ending on an unanswered `tool_use`, which the API rejects on every
+ * subsequent send: one transient failure mid-tool-loop bricked the session for
+ * good, and the retry the caller was offering could never succeed.
+ *
+ * So: drop the partial turn's messages, then the user prompt that started it.
+ */
+export function rollbackFailedTurn(messages: Message[]): void {
+  while (messages.length > 0) {
+    const last = messages[messages.length - 1];
+    const partial =
+      (last.role === "assistant" && hasBlockOfType(last, "tool_use")) ||
+      (last.role === "user" && hasBlockOfType(last, "tool_result"));
+    if (!partial) break;
+    messages.pop();
+  }
+  // What remains on top is the user prompt that opened the failed turn.
+  if (messages.length > 0 && messages[messages.length - 1].role === "user") messages.pop();
+}
+
 // ─── One-shot (non-interactive) run ───────────────────────────────────────────
 // Runs a single prompt to completion and returns a process exit code: 0 on
 // success, 1 if the model call or a fatal error occurs. Text streams through

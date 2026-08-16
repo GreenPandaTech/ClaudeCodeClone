@@ -22,7 +22,15 @@ import {
   applyCacheBreakpoint,
 } from "./context.js";
 import { compactHistory } from "./compact.js";
-import { runAgenticLoop, runOnce, type AgentContext, type LlmClient, type LlmStream, type Message } from "./agent.js";
+import {
+  runAgenticLoop,
+  runOnce,
+  rollbackFailedTurn,
+  type AgentContext,
+  type LlmClient,
+  type LlmStream,
+  type Message,
+} from "./agent.js";
 import { VERSION } from "./version.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -692,8 +700,10 @@ async function main() {
     } catch (err) {
       if (err instanceof Anthropic.APIError) {
         console.error(chalk.red(`\nAPI Error ${err.status}: ${err.message}`));
-        // Remove the failed message so the user can retry
-        messages.pop();
+        // Roll the whole partial turn back so the user can retry. Popping only
+        // the last message left an unanswered tool_use on top of the history,
+        // which the API rejects on every later send.
+        rollbackFailedTurn(messages);
         if (isContextOverflowError(err)) {
           // The turn never succeeded, so auto-compact could not fire; point at
           // the recovery tool (chunked, so it works however far over we are).
@@ -706,7 +716,7 @@ async function main() {
         }
       } else {
         console.error(chalk.red("\nError: " + String(err)));
-        messages.pop();
+        rollbackFailedTurn(messages);
       }
     }
 
