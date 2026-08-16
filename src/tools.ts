@@ -101,10 +101,31 @@ export function readFile(filePath: string, offset?: number, limit?: number): Too
     if (isSensitivePath(resolved)) {
       return { output: `Error: reading ${path.basename(resolved)} is not permitted (sensitive path).`, isError: true };
     }
+    // offset is 1-based and limit is a count, so anything below 1 is outside
+    // this tool's domain. Left unchecked they reached Array.slice, where a
+    // negative start indexes backwards from the end: read_file(f, -2) returned
+    // the LAST lines of the file labelled "-2", "-1", "0" — a confident answer
+    // to a question that has none. Refuse instead.
+    if (offset != null && (!Number.isInteger(offset) || offset < 1)) {
+      return { output: `Error: offset must be an integer >= 1 (lines are 1-based), got ${String(offset)}.`, isError: true };
+    }
+    if (limit != null && (!Number.isInteger(limit) || limit < 1)) {
+      return { output: `Error: limit must be an integer >= 1, got ${String(limit)}.`, isError: true };
+    }
+
     const content = fs.readFileSync(resolved, "utf-8");
     const lines = content.split("\n");
 
     const start = (offset ?? 1) - 1;
+    // An offset past the last line produced an empty output with no error: the
+    // model could not tell "there is nothing there" from "the read produced
+    // nothing", and an empty string is not a valid tool_result content block.
+    if (start >= lines.length) {
+      return {
+        output: `Error: offset ${start + 1} is past the end of ${path.basename(resolved)} (${lines.length} lines).`,
+        isError: true,
+      };
+    }
     const end = limit != null ? start + limit : lines.length;
     const slice = lines.slice(start, end);
 

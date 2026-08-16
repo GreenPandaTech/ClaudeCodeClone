@@ -133,6 +133,57 @@ test("readFile numbers lines using offset and limit", () => {
   }
 });
 
+test("readFile refuses an out-of-domain offset instead of renumbering the file", () => {
+  const dir = mkTmpDir();
+  try {
+    const file = path.join(dir, "sample.txt");
+    fs.writeFileSync(file, "l1\nl2\nl3\nl4\nl5\n", "utf-8");
+    // offset is 1-based. A zero or negative offset used to index backwards from
+    // the end of the array, so the last lines of the file came back labelled
+    // "-2", "-1", "0" — a confident answer to a question that has none.
+    for (const bad of [0, -2, 1.5]) {
+      const res = readFile(file, bad);
+      assert.equal(res.isError, true, `offset ${bad}`);
+      assert.match(res.output, /offset/i);
+      assert.doesNotMatch(res.output, /l4|l5/);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readFile refuses a non-positive limit", () => {
+  const dir = mkTmpDir();
+  try {
+    const file = path.join(dir, "sample.txt");
+    fs.writeFileSync(file, "l1\nl2\nl3\n", "utf-8");
+    for (const bad of [0, -1, 2.5]) {
+      const res = readFile(file, 1, bad);
+      assert.equal(res.isError, true, `limit ${bad}`);
+      assert.match(res.output, /limit/i);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readFile says so when the offset is past the end of the file", () => {
+  const dir = mkTmpDir();
+  try {
+    const file = path.join(dir, "sample.txt");
+    fs.writeFileSync(file, "l1\nl2\nl3\n", "utf-8");
+    // Silence is the worst answer here: the model cannot tell "there is nothing
+    // there" from "the read produced nothing", and an empty tool_result is not
+    // a valid content block.
+    const res = readFile(file, 99);
+    assert.equal(res.isError, true);
+    assert.notEqual(res.output, "");
+    assert.match(res.output, /past the end/i);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ─── editFile error paths ─────────────────────────────────────────────────────
 
 test("editFile reports when old_string is not found", () => {
