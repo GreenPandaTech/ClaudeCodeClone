@@ -26,7 +26,11 @@ const EXAMPLES = [
   "echo del /s /q is dangerous",
 ];
 
-// Escape pipes so commands render inside a Markdown table cell.
+// Escape pipes so commands render inside a Markdown table cell. This is a
+// rendering helper for the fixed EXAMPLES above, not a sanitiser for untrusted
+// text: a backslash is deliberately left alone, because every cell is wrapped in
+// a code span where GFM renders a doubled backslash literally and the two
+// Windows rows above end in one.
 const cell = (s) => s.replace(/\|/g, "\\|");
 
 console.log("| Command | Rating | Reason |");

@@ -71,9 +71,16 @@ export function sessionPath(cwd: string, name: string): string {
 function ensureSessionStore(cwd: string): void {
   const dir = sessionsDir(cwd);
   fs.mkdirSync(dir, { recursive: true });
+  // Create-if-absent in ONE syscall (wx is O_CREAT|O_EXCL) rather than asking
+  // existsSync and then writing: anything appearing in the gap between those two
+  // would be clobbered, and O_EXCL additionally refuses to follow a symlink
+  // planted there. EEXIST just means a .gitignore is already present — a user
+  // may have written their own, so leave it exactly as it is.
   const gitignore = path.join(cwd, ".mentor", ".gitignore");
-  if (!fs.existsSync(gitignore)) {
-    fs.writeFileSync(gitignore, "*\n", "utf-8");
+  try {
+    fs.writeFileSync(gitignore, "*\n", { encoding: "utf-8", flag: "wx" });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
   }
 }
 

@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import fs from "fs";
 import os from "os";
@@ -69,6 +69,23 @@ test("saveSession writes a self-ignoring .mentor/.gitignore", () => {
   saveSession(dir, "work", "m", SAMPLE);
   const ignore = fs.readFileSync(path.join(dir, ".mentor", ".gitignore"), "utf-8");
   assert.match(ignore, /\*/);
+});
+
+test("an existing .mentor/.gitignore survives a stale not-there answer", () => {
+  const dir = tmpDir();
+  saveSession(dir, "work", "m", SAMPLE);
+  const gitignore = path.join(dir, ".mentor", ".gitignore");
+  fs.writeFileSync(gitignore, "# hand-edited\n", "utf-8");
+  // Forcing existsSync to lie is the deterministic version of the file appearing
+  // in the gap between a check and the write that trusts it. The create has to
+  // refuse on its own, never on the strength of a separate earlier answer.
+  mock.method(fs, "existsSync", () => false);
+  try {
+    saveSession(dir, "work", "m", SAMPLE);
+  } finally {
+    mock.restoreAll();
+  }
+  assert.equal(fs.readFileSync(gitignore, "utf-8"), "# hand-edited\n");
 });
 
 test("listSessions returns saved names, sorted, empty when none", () => {

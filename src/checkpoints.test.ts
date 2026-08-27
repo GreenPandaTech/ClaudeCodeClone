@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import fs from "fs";
 import os from "os";
@@ -76,6 +76,59 @@ test("the checkpoint store makes .mentor self-ignoring like sessions do", () => 
   });
   const ignore = fs.readFileSync(path.join(dir, ".mentor", ".gitignore"), "utf-8");
   assert.match(ignore, /\*/);
+});
+
+// Forcing existsSync to lie is the deterministic version of a file appearing in
+// the gap between a check and the operation that trusts it. Neither of the two
+// stores below may depend on a separate earlier answer about the same path.
+
+test("recordChange appends to a turn already on disk despite a stale not-there answer", () => {
+  const dir = tmpDir();
+  recordChange(dir, 1, {
+    file: path.join(dir, "a.txt"),
+    tool: "write_file",
+    existedBefore: true,
+    before: "first pre-image",
+    afterHash: hashContent("one"),
+  });
+  mock.method(fs, "existsSync", () => false);
+  try {
+    recordChange(dir, 1, {
+      file: path.join(dir, "b.txt"),
+      tool: "edit_file",
+      existedBefore: false,
+      before: "",
+      afterHash: hashContent("two"),
+    });
+  } finally {
+    mock.restoreAll();
+  }
+  // A dropped pre-image is a change /undo can no longer walk back, so the append
+  // has to survive: both entries, in order, in the one turn.
+  const turns = listTurns(dir);
+  assert.equal(turns.length, 1);
+  assert.deepEqual(turns[0].changes.map((c) => c.before), ["first pre-image", ""]);
+});
+
+test("the checkpoint store leaves an existing .mentor/.gitignore alone", () => {
+  const dir = tmpDir();
+  const change = {
+    file: path.join(dir, "x"),
+    tool: "write_file",
+    existedBefore: false,
+    before: "",
+    afterHash: hashContent("x"),
+  };
+  recordChange(dir, 1, change);
+  const gitignore = path.join(dir, ".mentor", ".gitignore");
+  fs.writeFileSync(gitignore, "# hand-edited\n", "utf-8");
+  mock.method(fs, "existsSync", () => false);
+  try {
+    recordChange(dir, 2, change);
+  } finally {
+    mock.restoreAll();
+  }
+  assert.equal(fs.readFileSync(gitignore, "utf-8"), "# hand-edited\n");
 });
 
 test("listTurns returns turns sorted ascending and empty when none", () => {

@@ -58,9 +58,13 @@ function turnFile(cwd: string, turn: number): string {
 /** Ensure .mentor exists and self-ignores (same mechanism as the session store). */
 function ensureStore(cwd: string): void {
   fs.mkdirSync(checkpointsDir(cwd), { recursive: true });
+  // Create-if-absent in one syscall, exactly as the session store does — see the
+  // note there for why an existsSync-then-write pair is not good enough.
   const gitignore = path.join(cwd, ".mentor", ".gitignore");
-  if (!fs.existsSync(gitignore)) {
-    fs.writeFileSync(gitignore, "*\n", "utf-8");
+  try {
+    fs.writeFileSync(gitignore, "*\n", { encoding: "utf-8", flag: "wx" });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
   }
 }
 
@@ -133,12 +137,19 @@ export function nextTurnId(cwd: string): number {
 export function recordChange(cwd: string, turn: number, change: FileChange): string {
   ensureStore(cwd);
   const file = turnFile(cwd, turn);
-  let data: TurnCheckpoint;
-  if (fs.existsSync(file)) {
-    data = parseTurnCheckpoint(fs.readFileSync(file, "utf-8"));
-  } else {
-    data = { version: CHECKPOINT_SCHEMA_VERSION, turn, changes: [] };
+  // Let the read itself answer whether the turn already has a file. Asking
+  // existsSync first and reading afterwards means a file created in the gap is
+  // read as absent, and the append below then overwrites it — one silently lost
+  // pre-image is one change /undo can no longer walk back. ENOENT is the only
+  // failure that means "no checkpoint yet"; anything else must stay loud.
+  let text: string | null = null;
+  try {
+    text = fs.readFileSync(file, "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
+  const data: TurnCheckpoint =
+    text === null ? { version: CHECKPOINT_SCHEMA_VERSION, turn, changes: [] } : parseTurnCheckpoint(text);
   data.changes.push(change);
   fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf-8");
   return file;
